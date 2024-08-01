@@ -261,6 +261,7 @@ class DailyTransportClient(EventHandler):
         # video renderer is registered).
         self._client.update_subscription_profiles({
             "base": {
+                "microphone": "unsubscribed",
                 "camera": "unsubscribed",
                 "screenVideo": "unsubscribed"
             }
@@ -411,6 +412,15 @@ class DailyTransportClient(EventHandler):
 
     def stop_recording(self, stream_id):
         self._client.stop_recording(stream_id)
+
+    def capture_participant_audio( self, participant_id: str):
+        self._client.update_subscriptions({
+            participant_id: {
+                "media": {
+                    "microphone": "subscribed"
+                }
+            }
+        })
 
     def capture_participant_transcription(self, participant_id: str, callback: Callable):
         if not self._params.transcription_enabled:
@@ -812,6 +822,9 @@ class DailyTransport(BaseTransport):
 
     def stop_recording(self, stream_id=None):
         self._client.stop_recording(stream_id)
+
+    def update_subscription(self, participant_id):
+        self._client.capture_participant_audio(participant_id)
 
     def capture_participant_transcription(self, participant_id: str):
         self._client.capture_participant_transcription(
