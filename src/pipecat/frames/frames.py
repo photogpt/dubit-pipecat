@@ -553,7 +553,8 @@ class TranscriptionFrame(SystemFrame):
 @dataclass
 class InterimTranscriptionFrame(SystemFrame):
     """A text frame with interim transcription-specific data. Will be placed in
-    the transport's receive queue when a participant speaks."""
+    the transport's receive queue when a participant speaks.
+    """
 
     text: str
     user_id: str
@@ -590,6 +591,13 @@ class CustomAssistantTranscriptionFrame(Frame):
 
     def __str__(self):
         return f"{self.name}(text: [{self.text}], timestamp: {self.timestamp})"
+
+
+@dataclass
+class CustomVADDetectedSilence(SystemFrame):
+    """Emitted by the VAD to indicate that a user stopped speaking."""
+
+    pass
 
 
 @dataclass

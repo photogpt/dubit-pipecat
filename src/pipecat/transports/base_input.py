@@ -13,6 +13,7 @@ from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADState
 from pipecat.frames.frames import (
     BotInterruptionFrame,
     CancelFrame,
+    CustomVADDetectedSilence,
     EndFrame,
     FilterUpdateSettingsFrame,
     Frame,
@@ -147,6 +148,30 @@ class BaseInputTransport(FrameProcessor):
             )
         return state
 
+    # Original
+    # async def _handle_vad(self, audio_frames: bytes, vad_state: VADState):
+    #     new_vad_state = await self._vad_analyze(audio_frames)
+    #     if (
+    #         new_vad_state != vad_state
+    #         and new_vad_state != VADState.STARTING
+    #         and new_vad_state != VADState.STOPPING
+    #     ):
+    #         frame = None
+    #         if new_vad_state == VADState.SPEAKING:
+    #             frame = UserStartedSpeakingFrame()
+    #         elif new_vad_state == VADState.QUIET:
+    #             frame = UserStoppedSpeakingFrame()
+
+    #         if frame:
+    #             await self._handle_interruptions(frame)
+
+    #         vad_state = new_vad_state
+    #     return vad_state
+
+    # Dubit Modified
+    # Modifications:
+    # 1. Do not emit UserStartedSpeakingFrame as we are using deepgram for started speaking frame
+    # 2. Emit CustomVADDetectedSilence frame instead of UserStoppedSpeakingFrame
     async def _handle_vad(self, audio_frames: bytes, vad_state: VADState):
         new_vad_state = await self._vad_analyze(audio_frames)
         if (
@@ -156,9 +181,9 @@ class BaseInputTransport(FrameProcessor):
         ):
             frame = None
             if new_vad_state == VADState.SPEAKING:
-                frame = UserStartedSpeakingFrame()
+                frame = None  # do nothing here as we are using deepgram for started speaking frame
             elif new_vad_state == VADState.QUIET:
-                frame = UserStoppedSpeakingFrame()
+                frame = CustomVADDetectedSilence()  # emit custom frame
 
             if frame:
                 await self._handle_interruptions(frame)
