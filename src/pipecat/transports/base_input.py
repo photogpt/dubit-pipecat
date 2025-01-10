@@ -149,30 +149,30 @@ class BaseInputTransport(FrameProcessor):
         return state
 
     # Original
-    # async def _handle_vad(self, audio_frames: bytes, vad_state: VADState):
-    #     new_vad_state = await self._vad_analyze(audio_frames)
-    #     if (
-    #         new_vad_state != vad_state
-    #         and new_vad_state != VADState.STARTING
-    #         and new_vad_state != VADState.STOPPING
-    #     ):
-    #         frame = None
-    #         if new_vad_state == VADState.SPEAKING:
-    #             frame = UserStartedSpeakingFrame()
-    #         elif new_vad_state == VADState.QUIET:
-    #             frame = UserStoppedSpeakingFrame()
+    async def _handle_vad(self, audio_frames: bytes, vad_state: VADState):
+        new_vad_state = await self._vad_analyze(audio_frames)
+        if (
+            new_vad_state != vad_state
+            and new_vad_state != VADState.STARTING
+            and new_vad_state != VADState.STOPPING
+        ):
+            frame = None
+            if new_vad_state == VADState.SPEAKING:
+                frame = UserStartedSpeakingFrame()
+            elif new_vad_state == VADState.QUIET:
+                frame = UserStoppedSpeakingFrame()
 
-    #         if frame:
-    #             await self._handle_interruptions(frame)
+            if frame:
+                await self._handle_interruptions(frame)
 
-    #         vad_state = new_vad_state
-    #     return vad_state
+            vad_state = new_vad_state
+        return vad_state
 
     # Dubit Modified
     # Modifications:
     # 1. Do not emit UserStartedSpeakingFrame as we are using deepgram for started speaking frame
     # 2. Emit CustomVADDetectedSilence frame instead of UserStoppedSpeakingFrame
-    async def _handle_vad(self, audio_frames: bytes, vad_state: VADState):
+    async def _handle_vad_hybrid(self, audio_frames: bytes, vad_state: VADState):
         new_vad_state = await self._vad_analyze(audio_frames)
         if (
             new_vad_state != vad_state
@@ -186,6 +186,7 @@ class BaseInputTransport(FrameProcessor):
                 frame = CustomVADDetectedSilenceFrame()  # emit custom frame
 
             if frame:
+                # TODO: in hybrid mode, interruptions are not handled; if interruptions are enabled then modify _handle_interruptions accordingly
                 await self._handle_interruptions(frame)
 
             vad_state = new_vad_state
@@ -206,7 +207,10 @@ class BaseInputTransport(FrameProcessor):
                 # Check VAD and push event if necessary. We just care about
                 # changes from QUIET to SPEAKING and vice versa.
                 if self._params.vad_enabled:
-                    vad_state = await self._handle_vad(frame.audio, vad_state)
+                    if self._params.hybrid_vad:
+                        vad_state = await self._handle_vad_hybrid(frame.audio, vad_state)
+                    else:
+                        vad_state = await self._handle_vad(frame.audio, vad_state)
                     audio_passthrough = self._params.vad_audio_passthrough
 
                 # Push audio downstream if passthrough.
