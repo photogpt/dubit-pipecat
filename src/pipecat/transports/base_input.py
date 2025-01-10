@@ -13,7 +13,7 @@ from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADState
 from pipecat.frames.frames import (
     BotInterruptionFrame,
     CancelFrame,
-    CustomVADDetectedSilence,
+    CustomVADDetectedSilenceFrame,
     EndFrame,
     FilterUpdateSettingsFrame,
     Frame,
@@ -183,7 +183,7 @@ class BaseInputTransport(FrameProcessor):
             if new_vad_state == VADState.SPEAKING:
                 frame = None  # do nothing here as we are using deepgram for started speaking frame
             elif new_vad_state == VADState.QUIET:
-                frame = CustomVADDetectedSilence()  # emit custom frame
+                frame = CustomVADDetectedSilenceFrame()  # emit custom frame
 
             if frame:
                 await self._handle_interruptions(frame)

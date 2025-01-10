@@ -594,7 +594,7 @@ class CustomAssistantTranscriptionFrame(Frame):
 
 
 @dataclass
-class CustomVADDetectedSilence(SystemFrame):
+class CustomVADDetectedSilenceFrame(SystemFrame):
     """Emitted by the VAD to indicate that a user stopped speaking."""
 
     pass
