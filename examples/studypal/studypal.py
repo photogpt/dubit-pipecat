@@ -1,15 +1,12 @@
+import aiohttp
 import asyncio
-import io
 import os
 import sys
+import io
 
-import aiohttp
-import tiktoken
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-from loguru import logger
 from pypdf import PdfReader
-from runner import configure
+import tiktoken
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMMessagesFrame
@@ -20,6 +17,12 @@ from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.cartesia import CartesiaTTSService
 from pipecat.services.openai import OpenAILLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
+
+from runner import configure
+
+from loguru import logger
+
+from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
@@ -125,7 +128,9 @@ async def main():
             api_key=os.getenv("CARTESIA_API_KEY"),
             voice_id=os.getenv("CARTESIA_VOICE_ID", "4d2fd738-3b3d-4368-957a-bb4805275bd9"),
             # British Narration Lady: 4d2fd738-3b3d-4368-957a-bb4805275bd9
-            sample_rate=44100,
+            params=CartesiaTTSService.InputParams(
+                sample_rate=44100,
+            ),
         )
 
         llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")

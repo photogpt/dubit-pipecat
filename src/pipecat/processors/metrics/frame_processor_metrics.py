@@ -1,12 +1,4 @@
-#
-# Copyright (c) 2024, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 import time
-
-from loguru import logger
 
 from pipecat.frames.frames import MetricsFrame
 from pipecat.metrics.metrics import (
@@ -17,6 +9,8 @@ from pipecat.metrics.metrics import (
     TTFBMetricsData,
     TTSUsageMetricsData,
 )
+
+from loguru import logger
 
 
 class FrameProcessorMetrics:

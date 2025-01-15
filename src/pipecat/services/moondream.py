@@ -5,16 +5,19 @@
 #
 
 import asyncio
-from typing import AsyncGenerator
 
-from loguru import logger
 from PIL import Image
+
+from typing import AsyncGenerator
 
 from pipecat.frames.frames import ErrorFrame, Frame, TextFrame, VisionImageRawFrame
 from pipecat.services.ai_services import VisionService
 
+from loguru import logger
+
 try:
     import torch
+
     from transformers import AutoModelForCausalLM, AutoTokenizer
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")

@@ -35,12 +35,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r dev-requirements.txt
       - name: Ruff formatter
-        id: ruff-format
+        id: ruff
         run: |
           source .venv/bin/activate
           ruff format --diff
-      - name: Ruff import linter
-        id: ruff-check
-        run: |
-          source .venv/bin/activate
-          ruff check --select I

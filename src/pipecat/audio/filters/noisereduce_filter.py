@@ -5,9 +5,11 @@
 #
 
 import numpy as np
-from loguru import logger
 
 from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
+
+from loguru import logger
+
 from pipecat.frames.frames import FilterControlFrame, FilterEnableFrame
 
 try:

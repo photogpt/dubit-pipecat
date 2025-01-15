@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Optional
 
 import aiohttp
 from loguru import logger
-from pydantic import BaseModel
+from pydantic.main import BaseModel
 
 from pipecat.frames.frames import (
     CancelFrame,

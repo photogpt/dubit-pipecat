@@ -1,9 +1,3 @@
-#
-# Copyright (c) 2024, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
 import asyncio
 from typing import AsyncGenerator
 
@@ -73,7 +67,8 @@ class AssemblyAISTTService(STTService):
         await self._disconnect()
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
-        """Process an audio chunk for STT transcription.
+        """
+        Process an audio chunk for STT transcription.
 
         This method streams the audio data to AssemblyAI for real-time transcription.
         Transcription results are handled asynchronously via callback functions.
@@ -88,7 +83,8 @@ class AssemblyAISTTService(STTService):
         yield None
 
     async def _connect(self):
-        """Establish a connection to the AssemblyAI real-time transcription service.
+        """
+        Establish a connection to the AssemblyAI real-time transcription service.
 
         This method sets up the necessary callback functions and initializes the
         AssemblyAI transcriber.
@@ -99,7 +95,8 @@ class AssemblyAISTTService(STTService):
             logger.info(f"{self}: Connected to AssemblyAI")
 
         def on_data(transcript: aai.RealtimeTranscript):
-            """Callback for handling incoming transcription data.
+            """
+            Callback for handling incoming transcription data.
 
             This function runs in a separate thread from the main asyncio event loop.
             It creates appropriate transcription frames and schedules them to be
@@ -124,7 +121,8 @@ class AssemblyAISTTService(STTService):
             asyncio.run_coroutine_threadsafe(self.push_frame(frame), self._loop)
 
         def on_error(error: aai.RealtimeError):
-            """Callback for handling errors from AssemblyAI.
+            """
+            Callback for handling errors from AssemblyAI.
 
             Like on_data, this runs in a separate thread and schedules error
             handling in the main event loop.

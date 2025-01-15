@@ -5,13 +5,9 @@
 #
 
 import asyncio
+import aiohttp
 import os
 import sys
-
-import aiohttp
-from dotenv import load_dotenv
-from loguru import logger
-from runner import configure
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import Frame, TextFrame, UserImageRequestFrame
@@ -24,6 +20,12 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.cartesia import CartesiaTTSService
 from pipecat.services.google import GoogleLLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
+
+from runner import configure
+
+from loguru import logger
+
+from dotenv import load_dotenv
 
 load_dotenv(override=True)
 

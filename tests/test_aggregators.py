@@ -3,20 +3,23 @@ import doctest
 import functools
 import unittest
 
-from pipecat.frames.frames import (
-    AudioRawFrame,
-    EndFrame,
-    Frame,
-    ImageRawFrame,
-    LLMFullResponseEndFrame,
-    LLMFullResponseStartFrame,
-    TextFrame,
-)
-from pipecat.pipeline.parallel_pipeline import ParallelPipeline
-from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.aggregators.gated import GatedAggregator
 from pipecat.processors.aggregators.sentence import SentenceAggregator
 from pipecat.processors.text_transformer import StatelessTextTransformer
+
+from pipecat.pipeline.parallel_pipeline import ParallelPipeline
+
+from pipecat.frames.frames import (
+    AudioRawFrame,
+    EndFrame,
+    ImageRawFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    Frame,
+    TextFrame,
+)
+
+from pipecat.pipeline.pipeline import Pipeline
 
 
 class TestDailyFrameAggregators(unittest.IsolatedAsyncioTestCase):

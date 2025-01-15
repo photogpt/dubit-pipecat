@@ -5,6 +5,7 @@
 #
 
 import asyncio
+
 from typing import Any, AsyncGenerator
 
 from pipecat.frames.frames import (
@@ -12,7 +13,7 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
 )
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.serializers.base_serializer import FrameSerializer
 
 

@@ -4,22 +4,20 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import aiohttp
 import asyncio
 import os
 import sys
-import tkinter as tk
 
-import aiohttp
-from dotenv import load_dotenv
-from loguru import logger
+import tkinter as tk
 
 from pipecat.frames.frames import (
     Frame,
-    LLMMessagesFrame,
     OutputAudioRawFrame,
-    TextFrame,
     TTSAudioRawFrame,
     URLImageRawFrame,
+    LLMMessagesFrame,
+    TextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -28,10 +26,14 @@ from pipecat.pipeline.task import PipelineTask
 from pipecat.processors.aggregators.sentence import SentenceAggregator
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.cartesia import CartesiaHttpTTSService
-from pipecat.services.fal import FalImageGenService
 from pipecat.services.openai import OpenAILLMService
+from pipecat.services.fal import FalImageGenService
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.local.tk import TkLocalTransport, TkOutputTransport
+
+from loguru import logger
+
+from dotenv import load_dotenv
 
 load_dotenv(override=True)
 

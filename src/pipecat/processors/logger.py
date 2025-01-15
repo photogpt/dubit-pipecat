@@ -4,12 +4,10 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-from typing import Optional
-
-from loguru import logger
-
-from pipecat.frames.frames import AudioRawFrame, BotSpeakingFrame, Frame, TransportMessageFrame
+from pipecat.frames.frames import BotSpeakingFrame, Frame, AudioRawFrame, TransportMessageFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from loguru import logger
+from typing import Optional
 
 logger = logger.opt(ansi=True)
 

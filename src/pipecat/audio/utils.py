@@ -5,7 +5,6 @@
 #
 
 import audioop
-
 import numpy as np
 import pyloudnorm as pyln
 import resampy

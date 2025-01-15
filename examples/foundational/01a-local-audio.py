@@ -5,11 +5,9 @@
 #
 
 import asyncio
+import aiohttp
 import os
 import sys
-
-from dotenv import load_dotenv
-from loguru import logger
 
 from pipecat.frames.frames import EndFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -18,6 +16,10 @@ from pipecat.pipeline.task import PipelineTask
 from pipecat.services.cartesia import CartesiaTTSService
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.local.audio import LocalAudioTransport
+
+from loguru import logger
+
+from dotenv import load_dotenv
 
 load_dotenv(override=True)
 

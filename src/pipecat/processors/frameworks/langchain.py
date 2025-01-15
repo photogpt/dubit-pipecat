@@ -6,8 +6,6 @@
 
 from typing import Union
 
-from loguru import logger
-
 from pipecat.frames.frames import (
     Frame,
     LLMFullResponseEndFrame,
@@ -16,6 +14,8 @@ from pipecat.frames.frames import (
     TextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+from loguru import logger
 
 try:
     from langchain_core.messages import AIMessageChunk

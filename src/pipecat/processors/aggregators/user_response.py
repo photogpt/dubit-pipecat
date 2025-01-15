@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.frames.frames import (
     Frame,
     InterimTranscriptionFrame,
@@ -13,7 +14,6 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 
 class ResponseAggregator(FrameProcessor):

@@ -1,8 +1,9 @@
 import unittest
+
 from typing import AsyncGenerator
 
-from pipecat.frames.frames import EndFrame, Frame, TextFrame
 from pipecat.services.ai_services import AIService, match_endofsentence
+from pipecat.frames.frames import EndFrame, Frame, TextFrame
 
 
 class SimpleAIService(AIService):

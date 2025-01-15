@@ -2,11 +2,12 @@ import asyncio
 import unittest
 from unittest.mock import Mock
 
-from pipecat.frames.frames import EndFrame, TextFrame
-from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.aggregators.sentence import SentenceAggregator
-from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.processors.text_transformer import StatelessTextTransformer
+from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.frames.frames import EndFrame, TextFrame
+
+from pipecat.pipeline.pipeline import Pipeline
 
 
 class TestDailyPipeline(unittest.IsolatedAsyncioTestCase):

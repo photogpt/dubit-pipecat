@@ -1,6 +1,5 @@
-import os
-
 import requests
+import os
 from services.ai_service import AIService
 
 # Note that Cloudflare's AI workers are still in beta.

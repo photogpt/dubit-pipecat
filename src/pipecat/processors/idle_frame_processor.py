@@ -5,6 +5,7 @@
 #
 
 import asyncio
+
 from typing import Awaitable, Callable, List
 
 from pipecat.frames.frames import Frame

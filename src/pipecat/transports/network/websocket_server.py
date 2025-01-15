@@ -8,17 +8,16 @@ import asyncio
 import io
 import time
 import wave
-from typing import Awaitable, Callable
 
-from loguru import logger
-from pydantic import BaseModel
+from typing import Awaitable, Callable
+from pydantic.main import BaseModel
 
 from pipecat.frames.frames import (
+    AudioRawFrame,
     CancelFrame,
     EndFrame,
     Frame,
     InputAudioRawFrame,
-    OutputAudioRawFrame,
     StartFrame,
     StartInterruptionFrame,
 )
@@ -28,6 +27,8 @@ from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+
+from loguru import logger
 
 try:
     import websockets
@@ -68,8 +69,8 @@ class WebsocketServerInputTransport(BaseInputTransport):
         self._stop_server_event = asyncio.Event()
 
     async def start(self, frame: StartFrame):
-        await super().start(frame)
         self._server_task = self.get_event_loop().create_task(self._server_task_handler())
+        await super().start(frame)
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
@@ -104,8 +105,14 @@ class WebsocketServerInputTransport(BaseInputTransport):
             if not frame:
                 continue
 
-            if isinstance(frame, InputAudioRawFrame):
-                await self.push_audio_frame(frame)
+            if isinstance(frame, AudioRawFrame):
+                await self.push_audio_frame(
+                    InputAudioRawFrame(
+                        audio=frame.audio,
+                        sample_rate=frame.sample_rate,
+                        num_channels=frame.num_channels,
+                    )
+                )
             else:
                 await self.push_frame(frame)
 
@@ -150,27 +157,29 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
             await self._write_audio_sleep()
             return
 
-        frame = OutputAudioRawFrame(
+        frame = AudioRawFrame(
             audio=frames,
             sample_rate=self._params.audio_out_sample_rate,
             num_channels=self._params.audio_out_channels,
         )
 
         if self._params.add_wav_header:
-            with io.BytesIO() as buffer:
-                with wave.open(buffer, "wb") as wf:
-                    wf.setsampwidth(2)
-                    wf.setnchannels(frame.num_channels)
-                    wf.setframerate(frame.sample_rate)
-                    wf.writeframes(frame.audio)
-                wav_frame = OutputAudioRawFrame(
-                    buffer.getvalue(),
-                    sample_rate=frame.sample_rate,
-                    num_channels=frame.num_channels,
-                )
-                frame = wav_frame
+            content = io.BytesIO()
+            ww = wave.open(content, "wb")
+            ww.setsampwidth(2)
+            ww.setnchannels(frame.num_channels)
+            ww.setframerate(frame.sample_rate)
+            ww.writeframes(frame.audio)
+            ww.close()
+            content.seek(0)
+            wav_frame = AudioRawFrame(
+                content.read(), sample_rate=frame.sample_rate, num_channels=frame.num_channels
+            )
+            frame = wav_frame
 
-        await self._write_frame(frame)
+        proto = self._params.serializer.serialize(frame)
+        if proto:
+            await self._websocket.send(proto)
 
         self._websocket_audio_buffer = bytes()
 

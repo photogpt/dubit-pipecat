@@ -499,21 +499,6 @@ class DailyTransportClient(EventHandler):
         self._client.stop_dialout(participant_id, completion=completion_callback(future))
         await future
 
-    async def send_dtmf(self, settings):
-        future = self._loop.create_future()
-        self._client.send_dtmf(settings, completion=completion_callback(future))
-        await future
-
-    async def sip_call_transfer(self, settings):
-        future = self._loop.create_future()
-        self._client.sip_call_transfer(settings, completion=completion_callback(future))
-        await future
-
-    async def sip_refer(self, settings):
-        future = self._loop.create_future()
-        self._client.sip_refer(settings, completion=completion_callback(future))
-        await future
-
     async def start_recording(self, streaming_settings, stream_id, force_new):
         future = self._loop.create_future()
         self._client.start_recording(
@@ -526,18 +511,8 @@ class DailyTransportClient(EventHandler):
         self._client.stop_recording(stream_id, completion=completion_callback(future))
         await future
 
-    async def capture_participant_audio(self, participant_id: str):
-        await self.update_subscriptions({participant_id: {"media": {"microphone": "subscribed"}}})
-
-    async def send_prebuilt_chat_message(self, message: str, user_name: str | None = None):
-        if not self._joined:
-            return
-
-        future = self._loop.create_future()
-        self._client.send_prebuilt_chat_message(
-            message, user_name=user_name, completion=completion_callback(future)
-        )
-        await future
+    def capture_participant_audio(self, participant_id: str):
+        self._client.update_subscriptions({participant_id: {"media": {"microphone": "subscribed"}}})
 
     async def capture_participant_transcription(self, participant_id: str):
         if not self._params.transcription_enabled:
@@ -821,13 +796,12 @@ class DailyInputTransport(BaseInputTransport):
         render_frame = False
 
         curr_time = time.time()
-        prev_time = self._video_renderers[participant_id]["timestamp"]
+        prev_time = self._video_renderers[participant_id]["timestamp"] or curr_time
         framerate = self._video_renderers[participant_id]["framerate"]
 
         if framerate > 0:
             next_time = prev_time + 1 / framerate
-            render_frame = (next_time - curr_time) < 0.1
-
+            render_frame = (curr_time - next_time) < 0.1
         elif self._video_renderers[participant_id]["render_next_frame"]:
             self._video_renderers[participant_id]["render_next_frame"] = False
             render_frame = True
@@ -837,7 +811,8 @@ class DailyInputTransport(BaseInputTransport):
                 user_id=participant_id, image=buffer, size=size, format=format
             )
             await self.push_frame(frame)
-            self._video_renderers[participant_id]["timestamp"] = curr_time
+
+        self._video_renderers[participant_id]["timestamp"] = curr_time
 
 
 class DailyOutputTransport(BaseOutputTransport):
@@ -990,32 +965,14 @@ class DailyTransport(BaseTransport):
     async def stop_dialout(self, participant_id):
         await self._client.stop_dialout(participant_id)
 
-    async def send_dtmf(self, settings):
-        await self._client.send_dtmf(settings)
-
-    async def sip_call_transfer(self, settings):
-        await self._client.sip_call_transfer(settings)
-
-    async def sip_refer(self, settings):
-        await self._client.sip_refer(settings)
-
     async def start_recording(self, streaming_settings=None, stream_id=None, force_new=None):
         await self._client.start_recording(streaming_settings, stream_id, force_new)
 
     async def stop_recording(self, stream_id=None):
         await self._client.stop_recording(stream_id)
 
-    async def update_subscription(self, participant_id):
-        await self._client.capture_participant_audio(participant_id)
-
-    async def send_prebuilt_chat_message(self, message: str, user_name: str | None = None):
-        """Sends a chat message to Daily's Prebuilt main room.
-
-        Args:
-        message: The chat message to send
-        user_name: Optional user name that will appear as sender of the message
-        """
-        await self._client.send_prebuilt_chat_message(message, user_name)
+    def update_subscription(self, participant_id):
+        self._client.capture_participant_audio(participant_id)
 
     async def capture_participant_transcription(self, participant_id: str):
         await self._client.capture_participant_transcription(participant_id)
