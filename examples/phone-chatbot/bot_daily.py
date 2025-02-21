@@ -98,6 +98,7 @@ async def main(
             - **"Record your message after the tone."**
             - **Any phrase that suggests an answering machine or voicemail.**
             - **ASSUME IT IS A VOICEMAIL. DO NOT WAIT FOR MORE CONFIRMATION.**
+            - **IF THE CALL SAYS "PLEASE LEAVE A MESSAGE AFTER THE BEEP", WAIT FOR THE BEEP BEFORE LEAVING A MESSAGE.**
 
             #### **Step 2: Leave a Voicemail Message**
             - Immediately say:
@@ -110,7 +111,9 @@ async def main(
             - If the call is answered by a human, say:
             *"Oh, hello! I'm a friendly chatbot. Is there anything I can help you with?"*
             - Keep responses **brief and helpful**.
-            - If the user no longer needs assistance, **call `terminate_call` immediately.**
+            - If the user no longer needs assistance, say:
+            *"Okay, thank you! Have a great day!"*
+            -**Then call `terminate_call` immediately.**
 
             ---
 

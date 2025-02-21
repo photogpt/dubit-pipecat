@@ -120,6 +120,7 @@ class PlayHTTTSService(TTSService, WebsocketService):
     ):
         TTSService.__init__(
             self,
+            pause_frame_processing=True,
             sample_rate=sample_rate,
             **kwargs,
         )
@@ -269,19 +270,6 @@ class PlayHTTTSService(TTSService, WebsocketService):
                 except json.JSONDecodeError:
                     logger.error(f"Invalid JSON message: {message}")
 
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
-        # If we received a TTSSpeakFrame and the LLM response included text (it
-        # might be that it's only a function calling response) we pause
-        # processing more frames until we receive a BotStoppedSpeakingFrame.
-        if isinstance(frame, TTSSpeakFrame):
-            await self.pause_processing_frames()
-        elif isinstance(frame, LLMFullResponseEndFrame) and self._request_id:
-            await self.pause_processing_frames()
-        elif isinstance(frame, BotStoppedSpeakingFrame):
-            await self.resume_processing_frames()
-
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         logger.debug(f"Generating TTS: [{text}]")
 
@@ -409,6 +397,7 @@ class PlayHTHttpTTSService(TTSService):
             await self.start_tts_usage_metrics(text)
 
             yield TTSStartedFrame()
+
             async for chunk in playht_gen:
                 # skip the RIFF header.
                 if in_header:
@@ -428,6 +417,8 @@ class PlayHTHttpTTSService(TTSService):
                         await self.stop_ttfb_metrics()
                         frame = TTSAudioRawFrame(chunk, self.sample_rate, 1)
                         yield frame
-            yield TTSStoppedFrame()
         except Exception as e:
             logger.error(f"{self} error generating TTS: {e}")
+        finally:
+            await self.stop_ttfb_metrics()
+            yield TTSStoppedFrame()
