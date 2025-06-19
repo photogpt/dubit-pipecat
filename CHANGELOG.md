@@ -5,14 +5,116 @@ All notable changes to **Pipecat** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-
 ## [Unreleased]
+
+### Added
+
+- Added reconnection logic and audio buffer management to `GladiaSTTService`.
+
+- Added Polish support to `AWSTranscribeSTTService`.
+
+- Added new frames `FrameProcessorPauseFrame` and `FrameProcessorResumeFrame`
+  which allow pausing and resuming frame processing for a given frame
+  processor. These are control frames, so they are ordered. Pausing frame
+  processor will keep old frames in the internal queues until resume takes
+  place. Frames being pushed while a frame processor is paused will be pushed to
+  the queues. When frame processing is resumed all queued frames will be
+  processed in order. Also added `FrameProcessorPauseUrgentFrame` and
+  `FrameProcessorResumeUrgentFrame` which are system frames and therefore they
+  have high priority.
+
+- Added a property called `has_function_calls_in_progress` in
+  `LLMAssistantContextAggregator` that exposes whether a function call is in
+  progress.
+
+### Changed
+
+- `TavusTransport` and `TavusVideoService` now send audio to Tavus using WebRTC
+  audio tracks instead of `app-messages` over WebSocket. This should improve the
+  overall audio quality.
+
+- Upgraded `daily-python` to 0.19.3.
 
 ### Fixed
 
-- Fixed an issue where `OutputAudioRawFrame.transport_destination` was being 
-  reset to `None` instead of retaining its intended value before sending the 
+- Fixed an issue where voice settings weren't applied to ElevenLabsTTSService.
+
+- Fixed an issue with `GroqTTSService` where it was not properly parsing the
+  WAV file header.
+
+- Fixed an issue with `GoogleSTTService` where it was constantly reconnecting
+  before starting to receive audio from the user.
+
+- Fixed an issue where `GoogleLLMService`'s TTFB value was incorrect.
+
+### Other
+
+- Rename `14e-function-calling-gemini.py` to `14e-function-calling-google.py`.
+
+## [0.0.71] - 2025-06-10
+
+### Added
+
+- Adds a parameter called `additional_span_attributes` to PipelineTask that
+  lets you add any additional attributes you'd like to the conversation span.
+
+### Fixed
+
+- Fixed an issue with `CartesiaSTTService` initialization.
+
+## [0.0.70] - 2025-06-10
+
+### Added
+
+- Added `ExotelFrameSerializer` to handle telephony calls via Exotel.
+
+- Added the option `informal` to `TranslationConfig` on Gladia config.
+  Allowing to force informal language forms when available.
+
+- Added `CartesiaSTTService` which is a websocket based implementation to
+  transcribe audio. Added a foundational example in
+  `13f-cartesia-transcription.py`
+
+- Added an `websocket` example, showing how to use the new Pipecat client
+  `WebsocketTransport` to connect with Pipecat `FastAPIWebsocketTransport` or
+  `WebsocketServerTransport`.
+
+- Added language support to `RimeHttpTTSService`. Extended languages to include
+  German and French for both `RimeTTSService` and `RimeHttpTTSService`.
+
+### Changed
+
+- Upgraded `daily-python` to 0.19.2.
+
+- Make `PipelineTask.add_observer()` synchronous. This allows callers to call it
+  before doing the work of running the `PipelineTask` (i.e. without invoking
+  `PipelineTask.set_event_loop()` first).
+
+- Pipecat 0.0.69 forced `uvloop` event loop on Linux on macOS. Unfortunately,
+  this is causing issue in some systems. So, `uvloop` is not enabled by default
+  anymore. If you want to use `uvloop` you can just set the `asyncio` event
+  policy before starting your agent with:
+
+```python
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+```
+
+### Fixed
+
+- Fixed an issue with various TTS services that would cause audio glitches at
+  the start of every bot turn.
+
+- Fixed an `ElevenLabsTTSService` issue where a context warning was printed
+  when pushing a `TTSSpeakFrame`.
+
+- Fixed an `AssemblyAISTTService` issue that could cause unexpected behavior
+  when yielding empty `Frame()`s.
+
+- Fixed an issue where `OutputAudioRawFrame.transport_destination` was being
+  reset to `None` instead of retaining its intended value before sending the
   audio frame to `write_audio_frame`.
+
+- Fixed a typo in Livekit transport that prevented initialization.
 
 ## [0.0.69] - 2025-06-02 "AI Engineer World's Fair release" ✨
 
