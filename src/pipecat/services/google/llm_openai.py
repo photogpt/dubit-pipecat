@@ -11,6 +11,7 @@ from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
 
 from pipecat.services.llm_service import FunctionCallFromLLM
+from pipecat.utils.tracing.service_decorators import traced_llm
 
 # Suppress gRPC fork warnings
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
@@ -38,6 +39,7 @@ class GoogleLLMOpenAIBetaService(OpenAILLMService):
     ):
         super().__init__(api_key=api_key, base_url=base_url, model=model, **kwargs)
 
+    @traced_llm
     async def _process_context(self, context: OpenAILLMContext):
         functions_list = []
         arguments_list = []
