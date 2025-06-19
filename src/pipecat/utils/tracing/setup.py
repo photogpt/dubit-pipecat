@@ -61,7 +61,9 @@ def setup_tracing(
             {
                 "service.name": service_name,
                 "service.instance.id": os.getenv("HOSTNAME", "unknown"),
-                "deployment.environment": os.getenv("ENVIRONMENT", "development"),
+                "deployment.environment": os.getenv("ENV")
+                or os.getenv("ENVIRONMENT")
+                or "development",
             }
         )
 
