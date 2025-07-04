@@ -24,6 +24,8 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    DubitUserStartedSpeakingFrame,
+    DubitUserStoppedSpeakingFrame,
     EmulateUserStartedSpeakingFrame,
     EmulateUserStoppedSpeakingFrame,
     EndFrame,
@@ -374,11 +376,11 @@ class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame):
+        if isinstance(frame, DubitUserStartedSpeakingFrame):
             await self.push_frame(frame, direction)
         elif isinstance(frame, TranscriptionFrame):
             await self._handle_transcription(frame)
-        elif isinstance(frame, UserStoppedSpeakingFrame):
+        elif isinstance(frame, DubitUserStoppedSpeakingFrame):
             await self.push_aggregation()
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMMessagesAppendFrame):
