@@ -592,7 +592,7 @@ class DubitUserStartedSpeakingFrame(Frame):
     """Replacement of UserStartedSpeakingFrame which is a SystemFrame and
     gets processed before other "regular" Frames like DataFrame.
 
-    This is necessary because BetterLLMUserContextAggregator relies on ordering of
+    This is necessary because DubitLLMUserContextAggregator relies on ordering of
     UserStartedSpeakingFrame, TranscriptionFrame and UserStoppedSpeakingFrame
     """
 
@@ -604,7 +604,7 @@ class DubitUserStoppedSpeakingFrame(Frame):
     """Replacement of UserStoppedSpeakingFrame which is a SystemFrame and
     gets processed before other "regular" Frames like DataFrame.
 
-    This is necessary because BetterLLMUserContextAggregator relies on ordering of
+    This is necessary because DubitLLMUserContextAggregator relies on ordering of
     UserStartedSpeakingFrame, TranscriptionFrame and UserStoppedSpeakingFrame
     """
 
