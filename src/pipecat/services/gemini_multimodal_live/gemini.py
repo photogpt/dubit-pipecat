@@ -59,6 +59,7 @@ from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.services.google.frames import LLMSearchOrigin, LLMSearchResponseFrame, LLMSearchResult
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.openai.llm import (
     OpenAIAssistantContextAggregator,
@@ -71,6 +72,7 @@ from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_gemini_live, traced_stt
 
 from . import events
+from .file_api import GeminiFileAPI
 
 try:
     import websockets
@@ -218,6 +220,31 @@ class GeminiMultimodalLiveContext(OpenAILLMContext):
                     system_instruction += str(content)
         return system_instruction
 
+    def add_file_reference(self, file_uri: str, mime_type: str, text: Optional[str] = None):
+        """Add a file reference to the context.
+
+        This adds a user message with a file reference that will be sent during context initialization.
+
+        Args:
+            file_uri: URI of the uploaded file
+            mime_type: MIME type of the file
+            text: Optional text prompt to accompany the file
+        """
+        # Create parts list with file reference
+        parts = []
+        if text:
+            parts.append({"type": "text", "text": text})
+
+        # Add file reference part
+        parts.append(
+            {"type": "file_data", "file_data": {"mime_type": mime_type, "file_uri": file_uri}}
+        )
+
+        # Add to messages
+        message = {"role": "user", "content": parts}
+        self.messages.append(message)
+        logger.info(f"Added file reference to context: {file_uri}")
+
     def get_messages_for_initializing_history(self):
         """Get messages formatted for Gemini history initialization.
 
@@ -242,6 +269,16 @@ class GeminiMultimodalLiveContext(OpenAILLMContext):
                 for part in content:
                     if part.get("type") == "text":
                         parts.append({"text": part.get("text")})
+                    elif part.get("type") == "file_data":
+                        file_data = part.get("file_data", {})
+                        parts.append(
+                            {
+                                "fileData": {
+                                    "mimeType": file_data.get("mime_type"),
+                                    "fileUri": file_data.get("file_uri"),
+                                }
+                            }
+                        )
                     else:
                         logger.warning(f"Unsupported content type: {str(part)[:80]}")
             else:
@@ -345,7 +382,14 @@ class GeminiMultimodalModalities(Enum):
 
 
 class GeminiMediaResolution(str, Enum):
-    """Media resolution options for Gemini Multimodal Live."""
+    """Media resolution options for Gemini Multimodal Live.
+
+    Parameters:
+        UNSPECIFIED: Use default resolution setting.
+        LOW: Low resolution with 64 tokens.
+        MEDIUM: Medium resolution with 256 tokens.
+        HIGH: High resolution with zoomed reframing and 256 tokens.
+    """
 
     UNSPECIFIED = "MEDIA_RESOLUTION_UNSPECIFIED"  # Use default
     LOW = "MEDIA_RESOLUTION_LOW"  # 64 tokens
@@ -445,6 +489,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
         tools: Optional[Union[List[dict], ToolsSchema]] = None,
         params: Optional[InputParams] = None,
         inference_on_context_initialization: bool = True,
+        file_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta/files",
         **kwargs,
     ):
         """Initialize the Gemini Multimodal Live LLM service.
@@ -461,6 +506,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
             params: Configuration parameters for the model. Defaults to InputParams().
             inference_on_context_initialization: Whether to generate a response when context
                 is first set. Defaults to True.
+            file_api_base_url: Base URL for the Gemini File API. Defaults to the official endpoint.
             **kwargs: Additional arguments passed to parent LLMService.
         """
         super().__init__(base_url=base_url, **kwargs)
@@ -523,11 +569,28 @@ class GeminiMultimodalLiveLLMService(LLMService):
             "extra": params.extra if isinstance(params.extra, dict) else {},
         }
 
+        # Initialize the File API client
+        self.file_api = GeminiFileAPI(api_key=api_key, base_url=file_api_base_url)
+
+        # Initialize the File API client
+        self.file_api = GeminiFileAPI(api_key=api_key, base_url=file_api_base_url)
+
     def can_generate_metrics(self) -> bool:
         """Check if the service can generate usage metrics.
 
         Returns:
             True as Gemini Live supports token usage metrics.
+        """
+        return True
+
+    def needs_mcp_alternate_schema(self) -> bool:
+        """Check if this LLM service requires alternate MCP schema.
+
+        Google/Gemini has stricter JSON schema validation and requires
+        certain properties to be removed or modified for compatibility.
+
+        Returns:
+            True for Google/Gemini services.
         """
         return True
 
@@ -716,6 +779,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
         await self._ws_send(event.model_dump(exclude_none=True))
 
     async def _connect(self):
+        """Establish WebSocket connection to Gemini Live API."""
         if self._websocket:
             # Here we assume that if we have a websocket, we are connected. We
             # handle disconnections in the send/recv code paths.
@@ -820,6 +884,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
             self._websocket = None
 
     async def _disconnect(self):
+        """Disconnect from Gemini Live API and clean up resources."""
         logger.info("Disconnecting from Gemini service")
         try:
             self._disconnecting = True
@@ -836,6 +901,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
             logger.error(f"{self} error disconnecting: {e}")
 
     async def _ws_send(self, message):
+        """Send a message to the WebSocket connection."""
         # logger.debug(f"Sending message to websocket: {message}")
         try:
             if self._websocket:
@@ -856,6 +922,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
     #
 
     async def _receive_task_handler(self):
+        """Handle incoming messages from the WebSocket connection."""
         async for message in WatchdogAsyncIterator(self._websocket, manager=self.task_manager):
             evt = events.parse_server_event(message)
             # logger.debug(f"Received event: {message[:500]}")
@@ -884,6 +951,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
     #
 
     async def _send_user_audio(self, frame):
+        """Send user audio frame to Gemini Live API."""
         if self._audio_input_paused:
             return
         # Send all audio to Gemini
@@ -900,6 +968,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
             self._user_audio_buffer = self._user_audio_buffer[-length:]
 
     async def _send_user_video(self, frame):
+        """Send user video frame to Gemini Live API."""
         if self._video_input_paused:
             return
 
@@ -913,6 +982,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
         await self.send_client_event(evt)
 
     async def _create_initial_response(self):
+        """Create initial response based on context history."""
         if not self._api_session_ready:
             self._run_llm_when_api_session_ready = True
             return
@@ -938,7 +1008,8 @@ class GeminiMultimodalLiveLLMService(LLMService):
             self._needs_turn_complete_message = True
 
     async def _create_single_response(self, messages_list):
-        # refactor to combine this logic with same logic in GeminiMultimodalLiveContext
+        """Create a single response from a list of messages."""
+        # Refactor to combine this logic with same logic in GeminiMultimodalLiveContext
         messages = []
         for item in messages_list:
             role = item.get("role")
@@ -957,6 +1028,16 @@ class GeminiMultimodalLiveLLMService(LLMService):
                 for part in content:
                     if part.get("type") == "text":
                         parts.append({"text": part.get("text")})
+                    elif part.get("type") == "file_data":
+                        file_data = part.get("file_data", {})
+                        parts.append(
+                            {
+                                "fileData": {
+                                    "mimeType": file_data.get("mime_type"),
+                                    "fileUri": file_data.get("file_uri"),
+                                }
+                            }
+                        )
                     else:
                         logger.warning(f"Unsupported content type: {str(part)[:80]}")
             else:
@@ -980,6 +1061,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
 
     @traced_gemini_live(operation="llm_tool_result")
     async def _tool_result(self, tool_result_message):
+        """Send tool result back to the API."""
         # For now we're shoving the name into the tool_call_id field, so this
         # will work until we revisit that.
         id = tool_result_message.get("tool_call_id")
@@ -1005,6 +1087,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
 
     @traced_gemini_live(operation="llm_setup")
     async def _handle_evt_setup_complete(self, evt):
+        """Handle the setup complete event."""
         # If this is our first context frame, run the LLM
         self._api_session_ready = True
         # Now that we've configured the session, we can run the LLM if we need to.
@@ -1013,6 +1096,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
             await self._create_initial_response()
 
     async def _handle_evt_model_turn(self, evt):
+        """Handle the model turn event."""
         part = evt.serverContent.modelTurn.parts[0]
         if not part:
             return
@@ -1054,6 +1138,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
 
     @traced_gemini_live(operation="llm_tool_call")
     async def _handle_evt_tool_call(self, evt):
+        """Handle tool call events."""
         function_calls = evt.toolCall.functionCalls
         if not function_calls:
             return
@@ -1074,6 +1159,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
 
     @traced_gemini_live(operation="llm_response")
     async def _handle_evt_turn_complete(self, evt):
+        """Handle the turn complete event."""
         self._bot_is_speaking = False
         text = self._bot_text_buffer
 
@@ -1157,6 +1243,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
             )
 
     async def _handle_evt_output_transcription(self, evt):
+        """Handle the output transcription event."""
         if not evt.serverContent.outputTranscription:
             return
 
@@ -1175,6 +1262,7 @@ class GeminiMultimodalLiveLLMService(LLMService):
         await self.push_frame(TTSTextFrame(text=text))
 
     async def _handle_evt_usage_metadata(self, evt):
+        """Handle the usage metadata event."""
         if not evt.usageMetadata:
             return
 
