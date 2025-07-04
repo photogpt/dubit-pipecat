@@ -974,7 +974,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         asyncio.run_coroutine_threadsafe(self.wait_for_task(task), self.get_event_loop())
 
 
-class LLMUserResponseAggregator(DubitLLMUserContextAggregator):
+class LLMUserResponseAggregator(LLMUserContextAggregator):
     """User response aggregator that outputs LLMMessagesFrame instead of context frames.
 
     This aggregator extends LLMUserContextAggregator but pushes LLMMessagesFrame
