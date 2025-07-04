@@ -17,7 +17,7 @@ from pipecat.frames.frames import (
     UserImageRawFrame,
 )
 from pipecat.processors.aggregators.llm_response import (
-    BetterLLMUserContextAggregator,
+    DubitLLMUserContextAggregator,
     LLMAssistantAggregatorParams,
     LLMAssistantContextAggregator,
     LLMUserAggregatorParams,
@@ -36,10 +36,10 @@ class OpenAIContextAggregatorPair:
         _assistant: Assistant context aggregator for processing assistant messages.
     """
 
-    _user: Union["OpenAIUserContextAggregator", "PipecatOpenAIUserContextAggregator"]
+    _user: Union["OpenAIUserContextAggregator", "DubitOpenAIUserContextAggregator"]
     _assistant: "OpenAIAssistantContextAggregator"
 
-    def user(self) -> "OpenAIUserContextAggregator":
+    def user(self) -> "OpenAIUserContextAggregator|DubitOpenAIUserContextAggregator":
         """Get the user context aggregator.
 
         Returns:
@@ -86,7 +86,7 @@ class OpenAILLMService(BaseOpenAILLMService):
         *,
         user_params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
         assistant_params: LLMAssistantAggregatorParams = LLMAssistantAggregatorParams(),
-        aggregator_type: str = "ours",  # or "theirs"
+        aggregator_type: str = "pipecat",  # or "dubit"
     ) -> OpenAIContextAggregatorPair:
         """Create OpenAI-specific context aggregators.
 
@@ -105,19 +105,21 @@ class OpenAILLMService(BaseOpenAILLMService):
 
         """
         context.set_llm_adapter(self.get_llm_adapter())
-        if aggregator_type == "ours":
-            user = OpenAIUserContextAggregator(context, params=user_params)
+        if aggregator_type == "dubit":
+            user = DubitOpenAIUserContextAggregator(context, params=user_params)
         else:
-            user = PipecatOpenAIUserContextAggregator(context, params=user_params)
+            user = OpenAIUserContextAggregator(context, params=user_params)
         assistant = OpenAIAssistantContextAggregator(context, params=assistant_params)
         return OpenAIContextAggregatorPair(_user=user, _assistant=assistant)
 
 
-class OpenAIUserContextAggregator(BetterLLMUserContextAggregator):
+class DubitOpenAIUserContextAggregator(DubitLLMUserContextAggregator):
+    """Just a wrapper for DubitLLMUserContextAggregator."""
+
     pass
 
 
-class PipecatOpenAIUserContextAggregator(LLMUserContextAggregator):
+class OpenAIUserContextAggregator(LLMUserContextAggregator):
     """OpenAI-specific user context aggregator.
 
     Handles aggregation of user messages for OpenAI LLM services.

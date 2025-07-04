@@ -358,7 +358,7 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
         self._aggregation = ""
 
 
-class BetterLLMUserContextAggregator(LLMContextResponseAggregator):
+class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
     def __init__(
         self,
         context: OpenAILLMContext,
@@ -972,7 +972,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         asyncio.run_coroutine_threadsafe(self.wait_for_task(task), self.get_event_loop())
 
 
-class LLMUserResponseAggregator(BetterLLMUserContextAggregator):
+class LLMUserResponseAggregator(DubitLLMUserContextAggregator):
     """User response aggregator that outputs LLMMessagesFrame instead of context frames.
 
     This aggregator extends LLMUserContextAggregator but pushes LLMMessagesFrame
