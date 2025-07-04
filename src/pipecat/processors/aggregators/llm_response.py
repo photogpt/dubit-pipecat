@@ -24,6 +24,8 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    DubitUserStartedSpeakingFrame,
+    DubitUserStoppedSpeakingFrame,
     EmulateUserStartedSpeakingFrame,
     EmulateUserStoppedSpeakingFrame,
     EndFrame,
@@ -358,7 +360,7 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
         self._aggregation = ""
 
 
-class BetterLLMUserContextAggregator(LLMContextResponseAggregator):
+class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
     def __init__(
         self,
         context: OpenAILLMContext,
@@ -374,11 +376,11 @@ class BetterLLMUserContextAggregator(LLMContextResponseAggregator):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame):
+        if isinstance(frame, DubitUserStartedSpeakingFrame):
             await self.push_frame(frame, direction)
         elif isinstance(frame, TranscriptionFrame):
             await self._handle_transcription(frame)
-        elif isinstance(frame, UserStoppedSpeakingFrame):
+        elif isinstance(frame, DubitUserStoppedSpeakingFrame):
             await self.push_aggregation()
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMMessagesAppendFrame):
@@ -972,7 +974,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         asyncio.run_coroutine_threadsafe(self.wait_for_task(task), self.get_event_loop())
 
 
-class LLMUserResponseAggregator(BetterLLMUserContextAggregator):
+class LLMUserResponseAggregator(LLMUserContextAggregator):
     """User response aggregator that outputs LLMMessagesFrame instead of context frames.
 
     This aggregator extends LLMUserContextAggregator but pushes LLMMessagesFrame

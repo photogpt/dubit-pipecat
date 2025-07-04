@@ -569,7 +569,7 @@ class StopInterruptionFrame(SystemFrame):
 
 
 @dataclass
-class UserStartedSpeakingFrame(Frame):
+class UserStartedSpeakingFrame(SystemFrame):
     """Emitted by VAD to indicate that a user has started speaking. This can be
     used for interruptions or other times when detecting that someone is
     speaking is more important than knowing what they're saying (as you will
@@ -581,14 +581,38 @@ class UserStartedSpeakingFrame(Frame):
 
 
 @dataclass
-class UserStoppedSpeakingFrame(Frame):
+class UserStoppedSpeakingFrame(SystemFrame):
     """Emitted by the VAD to indicate that a user stopped speaking."""
 
     emulated: bool = False
 
 
 @dataclass
-class EmulateUserStartedSpeakingFrame(Frame):
+class DubitUserStartedSpeakingFrame(Frame):
+    """Replacement of UserStartedSpeakingFrame which is a SystemFrame and
+    gets processed before other "regular" Frames like DataFrame.
+
+    This is necessary because DubitLLMUserContextAggregator relies on ordering of
+    UserStartedSpeakingFrame, TranscriptionFrame and UserStoppedSpeakingFrame
+    """
+
+    emulated: bool = False
+
+
+@dataclass
+class DubitUserStoppedSpeakingFrame(Frame):
+    """Replacement of UserStoppedSpeakingFrame which is a SystemFrame and
+    gets processed before other "regular" Frames like DataFrame.
+
+    This is necessary because DubitLLMUserContextAggregator relies on ordering of
+    UserStartedSpeakingFrame, TranscriptionFrame and UserStoppedSpeakingFrame
+    """
+
+    emulated: bool = False
+
+
+@dataclass
+class EmulateUserStartedSpeakingFrame(SystemFrame):
     """Emitted by internal processors upstream to emulate VAD behavior when a
     user starts speaking.
     """
@@ -597,7 +621,7 @@ class EmulateUserStartedSpeakingFrame(Frame):
 
 
 @dataclass
-class EmulateUserStoppedSpeakingFrame(Frame):
+class EmulateUserStoppedSpeakingFrame(SystemFrame):
     """Emitted by internal processors upstream to emulate VAD behavior when a
     user stops speaking.
     """
@@ -684,7 +708,8 @@ class FunctionCallFromLLM:
 @dataclass
 class FunctionCallsStartedFrame(SystemFrame):
     """A frame signaling that one or more function call execution is going to
-    start."""
+    start.
+    """
 
     function_calls: Sequence[FunctionCallFromLLM]
 

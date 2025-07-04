@@ -17,8 +17,8 @@ from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
 
 from pipecat.services.llm_service import FunctionCallFromLLM
-from pipecat.utils.tracing.service_decorators import traced_llm
 from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
+from pipecat.utils.tracing.service_decorators import traced_llm
 
 # Suppress gRPC fork warnings
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
