@@ -94,7 +94,7 @@ class LLMFullResponseAggregator(FrameProcessor):
     the complete response via an event handler.
 
     The aggregator provides an "on_completion" event that fires when a full
-    completion is available:
+    completion is available::
 
         @aggregator.event_handler("on_completion")
         async def on_completion(
@@ -419,6 +419,7 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
 
     This aggregator handles the complex logic of aggregating user speech transcriptions
     from STT services. It manages multiple scenarios including:
+
     - Transcriptions received between VAD events
     - Transcriptions received outside VAD events
     - Interim vs final transcriptions
@@ -525,9 +526,9 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         elif isinstance(frame, InterimTranscriptionFrame):
             await self._handle_interim_transcription(frame)
         elif isinstance(frame, LLMMessagesAppendFrame):
-            self.add_messages(frame.messages)
+            await self._handle_llm_messages_append(frame)
         elif isinstance(frame, LLMMessagesUpdateFrame):
-            self.set_messages(frame.messages)
+            await self._handle_llm_messages_update(frame)
         elif isinstance(frame, LLMSetToolsFrame):
             self.set_tools(frame.tools)
         elif isinstance(frame, LLMSetToolChoiceFrame):
@@ -598,6 +599,16 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
 
     async def _cancel(self, frame: CancelFrame):
         await self._cancel_aggregation_task()
+
+    async def _handle_llm_messages_append(self, frame: LLMMessagesAppendFrame):
+        self.add_messages(frame.messages)
+        if frame.run_llm:
+            await self.push_context_frame()
+
+    async def _handle_llm_messages_update(self, frame: LLMMessagesUpdateFrame):
+        self.set_messages(frame.messages)
+        if frame.run_llm:
+            await self.push_context_frame()
 
     async def _handle_input_audio(self, frame: InputAudioRawFrame):
         for s in self.interruption_strategies:
@@ -710,6 +721,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
     """Assistant LLM aggregator that processes bot responses and function calls.
 
     This aggregator handles the complex logic of processing assistant responses including:
+
     - Text frame aggregation between response start/end markers
     - Function call lifecycle management
     - Context updates with timestamps
@@ -821,9 +833,9 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         elif isinstance(frame, TextFrame):
             await self._handle_text(frame)
         elif isinstance(frame, LLMMessagesAppendFrame):
-            self.add_messages(frame.messages)
+            await self._handle_llm_messages_append(frame)
         elif isinstance(frame, LLMMessagesUpdateFrame):
-            self.set_messages(frame.messages)
+            await self._handle_llm_messages_update(frame)
         elif isinstance(frame, LLMSetToolsFrame):
             self.set_tools(frame.tools)
         elif isinstance(frame, LLMSetToolChoiceFrame):
@@ -861,6 +873,16 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         # Push timestamp frame with current time
         timestamp_frame = OpenAILLMContextAssistantTimestampFrame(timestamp=time_now_iso8601())
         await self.push_frame(timestamp_frame)
+
+    async def _handle_llm_messages_append(self, frame: LLMMessagesAppendFrame):
+        self.add_messages(frame.messages)
+        if frame.run_llm:
+            await self.push_context_frame(FrameDirection.UPSTREAM)
+
+    async def _handle_llm_messages_update(self, frame: LLMMessagesUpdateFrame):
+        self.set_messages(frame.messages)
+        if frame.run_llm:
+            await self.push_context_frame(FrameDirection.UPSTREAM)
 
     async def _handle_interruptions(self, frame: StartInterruptionFrame):
         await self.push_aggregation()
