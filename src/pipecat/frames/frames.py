@@ -28,6 +28,7 @@ from typing import (
 )
 
 from pipecat.audio.interruptions.base_interruption_strategy import BaseInterruptionStrategy
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.metrics.metrics import MetricsData
 from pipecat.transcriptions.language import Language
@@ -613,6 +614,7 @@ class StartFrame(SystemFrame):
         audio_out_sample_rate: Output audio sample rate in Hz.
         allow_interruptions: Whether to allow user interruptions.
         enable_metrics: Whether to enable performance metrics collection.
+        enable_tracing: Whether to enable OpenTelemetry tracing.
         enable_usage_metrics: Whether to enable usage metrics collection.
         interruption_strategies: List of interruption handling strategies.
         report_only_initial_ttfb: Whether to report only initial time-to-first-byte.
@@ -622,6 +624,7 @@ class StartFrame(SystemFrame):
     audio_out_sample_rate: int = 24000
     allow_interruptions: bool = False
     enable_metrics: bool = False
+    enable_tracing: bool = False
     enable_usage_metrics: bool = False
     interruption_strategies: List[BaseInterruptionStrategy] = field(default_factory=list)
     report_only_initial_ttfb: bool = False
@@ -1199,6 +1202,23 @@ class OutputDTMFUrgentFrame(DTMFFrame, SystemFrame):
     """
 
     pass
+
+
+@dataclass
+class SpeechControlParamsFrame(SystemFrame):
+    """Frame for notifying processors of speech control parameter changes.
+
+    This includes parameters for both VAD (Voice Activity Detection) and
+    turn-taking analysis. It allows downstream processors to adjust their
+    behavior based on updated interaction control settings.
+
+    Parameters:
+        vad_params: Current VAD parameters.
+        turn_params: Current turn-taking analysis parameters.
+    """
+
+    vad_params: Optional[VADParams] = None
+    turn_params: Optional[SmartTurnParams] = None
 
 
 #

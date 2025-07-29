@@ -8,6 +8,7 @@ toml
 # Install all extras individually to ensure they're properly resolved
 pipecat-ai[anthropic]
 pipecat-ai[assemblyai]
+pipecat-ai[asyncai]
 pipecat-ai[aws]
 pipecat-ai[azure]
 pipecat-ai[cartesia]
@@ -23,6 +24,7 @@ pipecat-ai[gladia]
 pipecat-ai[google]
 pipecat-ai[grok]
 pipecat-ai[groq]
+pipecat-ai[inworld]
 # pipecat-ai[krisp] # Mocked
 pipecat-ai[koala]
 # pipecat-ai[langchain] # Mocked
@@ -46,6 +48,7 @@ pipecat-ai[sambanova]
 pipecat-ai[silero]
 pipecat-ai[simli]
 pipecat-ai[soundfile]
+pipecat-ai[soniox]
 pipecat-ai[speechmatics]
 pipecat-ai[tavus]
 pipecat-ai[together]

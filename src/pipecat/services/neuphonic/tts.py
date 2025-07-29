@@ -15,6 +15,7 @@ import base64
 import json
 from typing import Any, AsyncGenerator, Mapping, Optional
 
+import aiohttp
 from loguru import logger
 from pydantic import BaseModel
 
@@ -39,8 +40,8 @@ from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
 from pipecat.utils.tracing.service_decorators import traced_tts
 
 try:
-    import websockets
-    from pyneuphonic import Neuphonic, TTSConfig
+    from websockets.asyncio.client import connect as websocket_connect
+    from websockets.protocol import State
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Neuphonic, you need to `pip install pipecat-ai[neuphonic]`.")
@@ -106,10 +107,11 @@ class NeuphonicTTSService(InterruptibleTTSService):
         *,
         api_key: str,
         voice_id: Optional[str] = None,
-        url: str = "wss://api.neuphonic.com",
+        url: str = "wss://eu-west-1.api.neuphonic.com",
         sample_rate: Optional[int] = 22050,
         encoding: str = "pcm_linear",
         params: Optional[InputParams] = None,
+        aggregate_sentences: Optional[bool] = True,
         **kwargs,
     ):
         """Initialize the Neuphonic TTS service.
@@ -121,10 +123,11 @@ class NeuphonicTTSService(InterruptibleTTSService):
             sample_rate: Audio sample rate in Hz. Defaults to 22050.
             encoding: Audio encoding format. Defaults to "pcm_linear".
             params: Additional input parameters for TTS configuration.
+            aggregate_sentences: Whether to aggregate sentences within the TTSService.
             **kwargs: Additional arguments passed to parent InterruptibleTTSService.
         """
         super().__init__(
-            aggregate_sentences=True,
+            aggregate_sentences=aggregate_sentences,
             push_text_frames=False,
             push_stop_frames=True,
             stop_frame_timeout_s=2.0,
@@ -269,7 +272,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
     async def _connect_websocket(self):
         """Establish WebSocket connection to Neuphonic API."""
         try:
-            if self._websocket and self._websocket.open:
+            if self._websocket and self._websocket.state is State.OPEN:
                 return
 
             logger.debug("Connecting to Neuphonic")
@@ -279,14 +282,18 @@ class NeuphonicTTSService(InterruptibleTTSService):
                 "voice_id": self._voice_id,
             }
 
-            query_params = [f"api_key={self._api_key}"]
+            query_params = []
             for key, value in tts_config.items():
                 if value is not None:
                     query_params.append(f"{key}={value}")
 
-            url = f"{self._url}/speak/{self._settings['lang_code']}?{'&'.join(query_params)}"
+            url = f"{self._url}/speak/{self._settings['lang_code']}"
+            if query_params:
+                url += f"?{'&'.join(query_params)}"
 
-            self._websocket = await websockets.connect(url)
+            headers = {"x-api-key": self._api_key}
+
+            self._websocket = await websocket_connect(url, additional_headers=headers)
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
             self._websocket = None
@@ -311,7 +318,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
         async for message in WatchdogAsyncIterator(self._websocket, manager=self.task_manager):
             if isinstance(message, str):
                 msg = json.loads(message)
-                if msg.get("data", {}).get("audio") is not None:
+                if msg.get("data") and msg["data"].get("audio"):
                     await self.stop_ttfb_metrics()
 
                     audio = base64.b64decode(msg["data"]["audio"])
@@ -324,12 +331,19 @@ class NeuphonicTTSService(InterruptibleTTSService):
         while True:
             self.reset_watchdog()
             await asyncio.sleep(KEEPALIVE_SLEEP)
-            await self._send_text("")
+            await self._send_keepalive()
+
+    async def _send_keepalive(self):
+        """Send keepalive message to maintain connection."""
+        if self._websocket:
+            # Send empty text for keepalive
+            msg = {"text": ""}
+            await self._websocket.send(json.dumps(msg))
 
     async def _send_text(self, text: str):
         """Send text to Neuphonic WebSocket for synthesis."""
         if self._websocket:
-            msg = {"text": text}
+            msg = {"text": f"{text} <STOP>"}
             logger.debug(f"Sending text to websocket: {msg}")
             await self._websocket.send(json.dumps(msg))
 
@@ -346,7 +360,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
         logger.debug(f"Generating TTS: [{text}]")
 
         try:
-            if not self._websocket or self._websocket.closed:
+            if not self._websocket or self._websocket.state is State.CLOSED:
                 await self._connect()
 
             try:
@@ -393,9 +407,10 @@ class NeuphonicHttpTTSService(TTSService):
         *,
         api_key: str,
         voice_id: Optional[str] = None,
+        aiohttp_session: aiohttp.ClientSession,
         url: str = "https://api.neuphonic.com",
         sample_rate: Optional[int] = 22050,
-        encoding: str = "pcm_linear",
+        encoding: Optional[str] = "pcm_linear",
         params: Optional[InputParams] = None,
         **kwargs,
     ):
@@ -404,6 +419,7 @@ class NeuphonicHttpTTSService(TTSService):
         Args:
             api_key: Neuphonic API key for authentication.
             voice_id: ID of the voice to use for synthesis.
+            aiohttp_session: Shared aiohttp session for HTTP requests.
             url: Base URL for the Neuphonic HTTP API.
             sample_rate: Audio sample rate in Hz. Defaults to 22050.
             encoding: Audio encoding format. Defaults to "pcm_linear".
@@ -415,13 +431,11 @@ class NeuphonicHttpTTSService(TTSService):
         params = params or NeuphonicHttpTTSService.InputParams()
 
         self._api_key = api_key
-        self._url = url
-        self._settings = {
-            "lang_code": self.language_to_service_language(params.language),
-            "speed": params.speed,
-            "encoding": encoding,
-            "sampling_rate": sample_rate,
-        }
+        self._session = aiohttp_session
+        self._base_url = url.rstrip("/")
+        self._lang_code = self.language_to_service_language(params.language) or "en"
+        self._speed = params.speed
+        self._encoding = encoding
         self.set_voice(voice_id)
 
     def can_generate_metrics(self) -> bool:
@@ -459,6 +473,40 @@ class NeuphonicHttpTTSService(TTSService):
         """
         pass
 
+    def _parse_sse_message(self, message: str) -> dict | None:
+        """Parse a Server-Sent Event message.
+
+        Args:
+            message: The SSE message to parse.
+
+        Returns:
+            Parsed message dictionary or None if not a data message.
+        """
+        message = message.strip()
+
+        if not message or "data" not in message:
+            return None
+
+        try:
+            # Split on ": " and take the part after "data: "
+            _, data_content = message.split(": ", 1)
+
+            if not data_content or data_content == "[DONE]":
+                return None
+
+            message_dict = json.loads(data_content)
+
+            # Check for errors in the response
+            if message_dict.get("errors") is not None:
+                raise Exception(
+                    f"Neuphonic API error {message_dict.get('status_code', 'unknown')}: {message_dict['errors']}"
+                )
+
+            return message_dict
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"Failed to parse SSE message: {e}")
+            return None
+
     @traced_tts
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         """Generate speech from text using Neuphonic streaming API.
@@ -471,26 +519,71 @@ class NeuphonicHttpTTSService(TTSService):
         """
         logger.debug(f"Generating TTS: [{text}]")
 
-        client = Neuphonic(api_key=self._api_key, base_url=self._url.replace("https://", ""))
+        url = f"{self._base_url}/sse/speak/{self._lang_code}"
 
-        sse = client.tts.AsyncSSEClient()
+        headers = {
+            "X-API-KEY": self._api_key,
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "text": text,
+            "lang_code": self._lang_code,
+            "encoding": self._encoding,
+            "sampling_rate": self.sample_rate,
+            "speed": self._speed,
+        }
+
+        if self._voice_id:
+            payload["voice_id"] = self._voice_id
 
         try:
             await self.start_ttfb_metrics()
-            response = sse.send(text, TTSConfig(**self._settings, voice_id=self._voice_id))
 
-            await self.start_tts_usage_metrics(text)
-            yield TTSStartedFrame()
+            async with self._session.post(url, json=payload, headers=headers) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    error_message = f"Neuphonic API error: HTTP {response.status} - {error_text}"
+                    logger.error(error_message)
+                    yield ErrorFrame(error=error_message)
+                    return
 
-            async for message in response:
-                if message.status_code != 200:
-                    logger.error(f"{self} error: {message.errors}")
-                    yield ErrorFrame(error=f"Neuphonic API error: {message.errors}")
+                await self.start_tts_usage_metrics(text)
+                yield TTSStartedFrame()
 
-                await self.stop_ttfb_metrics()
-                yield TTSAudioRawFrame(message.data.audio, self.sample_rate, 1)
+                # Process SSE stream line by line
+                async for line in response.content:
+                    if not line:
+                        continue
+
+                    message = line.decode("utf-8", errors="ignore")
+                    if not message.strip():
+                        continue
+
+                    try:
+                        parsed_message = self._parse_sse_message(message)
+
+                        if (
+                            parsed_message is not None
+                            and parsed_message.get("data", {}).get("audio") is not None
+                        ):
+                            audio_b64 = parsed_message["data"]["audio"]
+                            audio_bytes = base64.b64decode(audio_b64)
+
+                            await self.stop_ttfb_metrics()
+                            yield TTSAudioRawFrame(audio_bytes, self.sample_rate, 1)
+
+                    except Exception as e:
+                        logger.error(f"Error processing SSE message: {e}")
+                        # Don't yield error frame for individual message failures
+                        continue
+
+        except asyncio.CancelledError:
+            logger.debug("TTS generation cancelled")
+            raise
         except Exception as e:
-            logger.error(f"Error in run_tts: {e}")
-            yield ErrorFrame(error=str(e))
+            logger.exception(f"Error in run_tts: {e}")
+            yield ErrorFrame(error=f"Neuphonic TTS error: {str(e)}")
         finally:
+            await self.stop_ttfb_metrics()
             yield TTSStoppedFrame()
