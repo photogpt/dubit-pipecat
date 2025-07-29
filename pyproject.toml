@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: Communications :: Conferencing",
     "Topic :: Multimedia :: Sound/Audio",
     "Topic :: Multimedia :: Video",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
 dependencies = [
     "aiohttp>=3.11.12,<4",
@@ -114,7 +114,9 @@ addopts = "--verbose"
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_default_fixture_loop_scope = "function"
-filterwarnings = ["ignore:'audioop' is deprecated:DeprecationWarning"]
+filterwarnings = [
+    "ignore:'audioop' is deprecated:DeprecationWarning"
+]
 
 [tool.setuptools_scm]
 local_scheme = "no-local-version"
