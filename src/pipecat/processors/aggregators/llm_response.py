@@ -375,7 +375,7 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
 class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
     """Dubit version of LLMUserContextAggregator based on our VAD Startegy
 
-    This aggregator used DubitUserStarted/StoppedSpeakingFrame(s) instead of
+    This aggregator used DubitUserStarted/StoppedSpeakingFrame(s) instead of,
     Pipecat's original UserStarted/StoppedSpeakingFrame based on our VAD strategy.
     """
 
@@ -386,7 +386,7 @@ class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
         params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
         **kwargs,
     ):
-        """Initialize the DubitUserContextAggregator
+        """Initialize the DubitUserContextAggregator.
 
         Args:
             context: The OpenAI LLM context for conversation storage.

@@ -75,6 +75,7 @@ class AzureSTTService(STTService):
         Args:
             api_key: Azure Cognitive Services subscription key.
             region: Azure region for the Speech service (e.g., 'eastus').
+            language_code: BCP47 language code like en_US, hi-IN, jp-JA, etc.
             language: Language for speech recognition. Defaults to English (US).
             sample_rate: Audio sample rate in Hz. If None, uses service default.
             endpoint_id: Custom model endpoint id.

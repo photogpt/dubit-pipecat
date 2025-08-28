@@ -907,7 +907,7 @@ class DailyTransportClient(EventHandler):
         """Subscribe to a specific participant's audio
 
         Args:
-            participant_id: ID of the participant to subscribe to
+            participant_id: ID of the participant to subscribe to.
         """
         await self.update_subscriptions({participant_id: {"media": {"microphone": "subscribed"}}})
 
@@ -2089,10 +2089,10 @@ class DailyTransport(BaseTransport):
         await self._client.stop_recording(stream_id)
 
     async def update_subscription(self, participant_id):
-        """Update subscription to a participant
+        """Update subscription to a participant.
 
         Args:
-            participant_id: ID of teh participant to subscribe to
+            participant_id: ID of the participant to subscribe to.
         """
         logger.info(f"Subscribing to {participant_id}'s audio")
         await self._client.subscribe_to_participant_audio(participant_id)
