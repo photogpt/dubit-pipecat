@@ -67,6 +67,7 @@ class AzureSTTService(STTService):
         language: Language = Language.EN_US,
         sample_rate: Optional[int] = None,
         vad_enabled: bool = False,
+        endpoint_id: Optional[str] = None,
         **kwargs,
     ):
         """Initialize the Azure STT service.
@@ -74,8 +75,11 @@ class AzureSTTService(STTService):
         Args:
             api_key: Azure Cognitive Services subscription key.
             region: Azure region for the Speech service (e.g., 'eastus').
+            language_code: BCP47 language code like en_US, hi-IN, jp-JA, etc.
             language: Language for speech recognition. Defaults to English (US).
             sample_rate: Audio sample rate in Hz. If None, uses service default.
+            endpoint_id: Custom model endpoint id.
+            vad_enabled: (Dubit) Whether to push VAD events
             **kwargs: Additional arguments passed to parent STTService.
         """
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -86,6 +90,9 @@ class AzureSTTService(STTService):
             speech_recognition_language=language_code,
             # speech_recognition_language=language_to_azure_language(language),
         )
+
+        if endpoint_id:
+            self._speech_config.endpoint_id = endpoint_id
 
         self._audio_stream = None
         self._speech_recognizer = None
@@ -189,7 +196,7 @@ class AzureSTTService(STTService):
         await self.stop_ttfb_metrics()
         await self.stop_processing_metrics()
 
-    async def frame_dispatcher(self, frame, frame_type):
+    async def _frame_dispatcher(self, frame, frame_type):
         if frame_type == "final":
             if self.vad_enabled:
                 await self.push_frame(UserStartedSpeakingFrame())
@@ -210,7 +217,7 @@ class AzureSTTService(STTService):
                 result=event,
             )
             asyncio.run_coroutine_threadsafe(
-                self.frame_dispatcher(frame, "final"), self.get_event_loop()
+                self._frame_dispatcher(frame, "final"), self.get_event_loop()
             )
             asyncio.run_coroutine_threadsafe(
                 self._handle_transcription(event.result.text, True, language), self.get_event_loop()
@@ -220,5 +227,5 @@ class AzureSTTService(STTService):
         if event.result.reason == ResultReason.RecognizingSpeech and len(event.result.text) > 0:
             frame = InterimTranscriptionFrame(event.result.text, "", time_now_iso8601())
             asyncio.run_coroutine_threadsafe(
-                self.frame_dispatcher(frame, "interim"), self.get_event_loop()
+                self._frame_dispatcher(frame, "interim"), self.get_event_loop()
             )

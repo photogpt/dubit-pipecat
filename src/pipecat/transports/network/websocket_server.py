@@ -154,7 +154,7 @@ class WebsocketServerInputTransport(BaseInputTransport):
             await self.cancel_task(self._monitor_task)
             self._monitor_task = None
         if self._server_task:
-            await self.wait_for_task(self._server_task)
+            await self._server_task
             self._server_task = None
 
     async def cancel(self, frame: CancelFrame):
@@ -353,8 +353,6 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
             frame: The output audio frame to write.
         """
         if not self._websocket:
-            # Simulate audio playback with a sleep.
-            await self._write_audio_sleep()
             return
 
         frame = OutputAudioRawFrame(

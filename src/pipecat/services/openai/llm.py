@@ -97,6 +97,7 @@ class OpenAILLMService(BaseOpenAILLMService):
             context: The LLM context to create aggregators for.
             user_params: Parameters for user message aggregation.
             assistant_params: Parameters for assistant message aggregation.
+            aggregator_type: "pipecat"(default) or "dubit"
 
         Returns:
             OpenAIContextAggregatorPair: A pair of context aggregators, one for
@@ -111,6 +112,15 @@ class OpenAILLMService(BaseOpenAILLMService):
             user = OpenAIUserContextAggregator(context, params=user_params)
         assistant = OpenAIAssistantContextAggregator(context, params=assistant_params)
         return OpenAIContextAggregatorPair(_user=user, _assistant=assistant)
+
+    @property
+    def supports_universal_context(self) -> bool:
+        """Check if this service supports universal LLMContext.
+
+        Returns:
+            True, as OpenAI service supports universal LLMContext.
+        """
+        return True
 
 
 class DubitOpenAIUserContextAggregator(DubitLLMUserContextAggregator):

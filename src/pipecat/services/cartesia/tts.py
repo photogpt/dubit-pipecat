@@ -10,7 +10,7 @@ import base64
 import json
 import uuid
 import warnings
-from typing import AsyncGenerator, List, Optional, Union
+from typing import AsyncGenerator, List, Literal, Optional, Union
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -29,10 +29,13 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.tts_service import AudioContextWordTTSService, TTSService
 from pipecat.transcriptions.language import Language
-from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
 from pipecat.utils.text.base_text_aggregator import BaseTextAggregator
 from pipecat.utils.text.skip_tags_aggregator import SkipTagsAggregator
 from pipecat.utils.tracing.service_decorators import traced_tts
+
+# Suppress regex warnings from pydub (used by cartesia)
+warnings.filterwarnings("ignore", message="invalid escape sequence", category=SyntaxWarning)
+
 
 # See .env.example for Cartesia configuration needed
 try:
@@ -98,7 +101,7 @@ class CartesiaTTSService(AudioContextWordTTSService):
 
         Parameters:
             language: Language to use for synthesis.
-            speed: Voice speed control (string or float).
+            speed: Voice speed control.
             emotion: List of emotion controls.
 
                 .. deprecated:: 0.0.68
@@ -106,7 +109,7 @@ class CartesiaTTSService(AudioContextWordTTSService):
         """
 
         language: Optional[Language] = Language.EN
-        speed: Optional[Union[str, float]] = ""
+        speed: Optional[Literal["slow", "normal", "fast"]] = None
         emotion: Optional[List[str]] = []
 
     def __init__(
@@ -211,6 +214,54 @@ class CartesiaTTSService(AudioContextWordTTSService):
             The Cartesia-specific language code, or None if not supported.
         """
         return language_to_cartesia_language(language)
+
+    def _is_cjk_language(self, language: str) -> bool:
+        """Check if the given language is CJK (Chinese, Japanese, Korean).
+
+        Args:
+            language: The language code to check.
+
+        Returns:
+            True if the language is Chinese, Japanese, or Korean.
+        """
+        cjk_languages = {"zh", "ja", "ko"}
+        base_lang = language.split("-")[0].lower()
+        return base_lang in cjk_languages
+
+    def _process_word_timestamps_for_language(
+        self, words: List[str], starts: List[float]
+    ) -> List[tuple[str, float]]:
+        """Process word timestamps based on the current language.
+
+        For CJK languages, Cartesia groups related characters in the same timestamp message.
+        For example, in Japanese a single message might be `['こ', 'ん', 'に', 'ち', 'は', '。']`.
+        We combine these into single words so the downstream aggregator can add natural
+        spacing between meaningful units rather than individual characters.
+
+        For non-CJK languages, words are already properly separated and are used as-is.
+
+        Args:
+            words: List of words/characters from Cartesia.
+            starts: List of start timestamps for each word/character.
+
+        Returns:
+            List of (word, start_time) tuples processed for the language.
+        """
+        current_language = self._settings.get("language", "en")
+
+        # Check if this is a CJK language
+        if self._is_cjk_language(current_language):
+            # For CJK languages, combine all characters in this message into one word
+            # using the first character's start time
+            if words and starts:
+                combined_word = "".join(words)
+                first_start = starts[0]
+                return [(combined_word, first_start)]
+            else:
+                return []
+        else:
+            # For non-CJK languages, use as-is
+            return list(zip(words, starts))
 
     def _build_msg(
         self, text: str = "", continue_transcript: bool = True, add_timestamps: bool = True
@@ -335,10 +386,8 @@ class CartesiaTTSService(AudioContextWordTTSService):
         await self._websocket.send(msg)
         self._context_id = None
 
-    async def _receive_messages(self):
-        async for message in WatchdogAsyncIterator(
-            self._get_websocket(), manager=self.task_manager
-        ):
+    async def _process_messages(self):
+        async for message in self._get_websocket():
             msg = json.loads(message)
             if not msg or not self.audio_context_available(msg["context_id"]):
                 continue
@@ -347,9 +396,11 @@ class CartesiaTTSService(AudioContextWordTTSService):
                 await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)])
                 await self.remove_audio_context(msg["context_id"])
             elif msg["type"] == "timestamps":
-                await self.add_word_timestamps(
-                    list(zip(msg["word_timestamps"]["words"], msg["word_timestamps"]["start"]))
+                # Process the timestamps based on language before adding them
+                processed_timestamps = self._process_word_timestamps_for_language(
+                    msg["word_timestamps"]["words"], msg["word_timestamps"]["start"]
                 )
+                await self.add_word_timestamps(processed_timestamps)
             elif msg["type"] == "chunk":
                 await self.stop_ttfb_metrics()
                 self.start_word_timestamps()
@@ -367,6 +418,14 @@ class CartesiaTTSService(AudioContextWordTTSService):
                 self._context_id = None
             else:
                 logger.error(f"{self} error, unknown message type: {msg}")
+
+    async def _receive_messages(self):
+        while True:
+            await self._process_messages()
+            # Cartesia times out after 5 minutes of innactivity (no keepalive
+            # mechanism is available). So, we try to reconnect.
+            logger.debug(f"{self} Cartesia connection was disconnected (timeout?), reconnecting")
+            await self._connect_websocket()
 
     @traced_tts
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
@@ -419,7 +478,7 @@ class CartesiaHttpTTSService(TTSService):
 
         Parameters:
             language: Language to use for synthesis.
-            speed: Voice speed control (string or float).
+            speed: Voice speed control.
             emotion: List of emotion controls.
 
                 .. deprecated:: 0.0.68
@@ -427,7 +486,7 @@ class CartesiaHttpTTSService(TTSService):
         """
 
         language: Optional[Language] = Language.EN
-        speed: Optional[Union[str, float]] = ""
+        speed: Optional[Literal["slow", "normal", "fast"]] = None
         emotion: Optional[List[str]] = Field(default_factory=list)
 
     def __init__(
