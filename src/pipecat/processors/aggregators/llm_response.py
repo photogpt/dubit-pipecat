@@ -378,6 +378,7 @@ class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
     This aggregator used DubitUserStarted/StoppedSpeakingFrame(s) instead of
     Pipecat's original UserStarted/StoppedSpeakingFrame based on our VAD strategy.
     """
+
     def __init__(
         self,
         context: OpenAILLMContext,
