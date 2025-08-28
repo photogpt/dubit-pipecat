@@ -373,7 +373,7 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
 
 
 class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
-    """Dubit version of LLMUserContextAggregator based on our VAD Startegy
+    """Dubit version of LLMUserContextAggregator based on our VAD Strategy.
 
     This aggregator used DubitUserStarted/StoppedSpeakingFrame(s) instead of,
     Pipecat's original UserStarted/StoppedSpeakingFrame based on our VAD strategy.

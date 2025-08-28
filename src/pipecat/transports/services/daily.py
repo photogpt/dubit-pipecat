@@ -904,7 +904,7 @@ class DailyTransportClient(EventHandler):
             logger.error(f"Unable to stop transcription: {error}")
 
     async def subscribe_to_participant_audio(self, participant_id: str):
-        """Subscribe to a specific participant's audio
+        """Subscribe to a specific participant's audio.
 
         Args:
             participant_id: ID of the participant to subscribe to.
