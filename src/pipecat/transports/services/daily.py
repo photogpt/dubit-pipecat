@@ -13,6 +13,7 @@ real-time communication features.
 
 import asyncio
 import time
+from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
@@ -48,7 +49,6 @@ from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.utils.asyncio.task_manager import BaseTaskManager
-from pipecat.utils.asyncio.watchdog_queue import WatchdogQueue
 
 try:
     from daily import (
@@ -350,6 +350,7 @@ class DailyTransportClient(EventHandler):
         self._video_renderers = {}
         self._transcription_ids = []
         self._transcription_status = None
+        self._dial_out_session_id: str = ""
 
         self._joining = False
         self._joined = False
@@ -357,7 +358,6 @@ class DailyTransportClient(EventHandler):
         self._leave_counter = 0
 
         self._task_manager: Optional[BaseTaskManager] = None
-        self._watchdog_timers_enabled = False
 
         # We use the executor to cleanup the client. We just do it from one
         # place, so only one thread is really needed.
@@ -526,9 +526,8 @@ class DailyTransportClient(EventHandler):
             return
 
         self._task_manager = setup.task_manager
-        self._watchdog_timers_enabled = setup.watchdog_timers_enabled
 
-        self._event_queue = WatchdogQueue(self._task_manager)
+        self._event_queue = asyncio.Queue()
         self._event_task = self._task_manager.create_task(
             self._callback_task_handler(self._event_queue),
             f"{self}::event_callback_task",
@@ -559,8 +558,8 @@ class DailyTransportClient(EventHandler):
         self._out_sample_rate = self._params.audio_out_sample_rate or frame.audio_out_sample_rate
 
         if self._params.audio_in_enabled:
-            if self._params.audio_in_user_tracks and not self._audio_task:
-                self._audio_queue = WatchdogQueue(self._task_manager)
+            if self._params.audio_in_user_tracks and not self._audio_task and self._task_manager:
+                self._audio_queue = asyncio.Queue()
                 self._audio_task = self._task_manager.create_task(
                     self._callback_task_handler(self._audio_queue),
                     f"{self}::audio_callback_task",
@@ -575,7 +574,7 @@ class DailyTransportClient(EventHandler):
                 Daily.select_speaker_device(self._speaker_name())
 
         if self._params.video_in_enabled and not self._video_task and self._task_manager:
-            self._video_queue = WatchdogQueue(self._task_manager)
+            self._video_queue = asyncio.Queue()
             self._video_task = self._task_manager.create_task(
                 self._callback_task_handler(self._video_queue),
                 f"{self}::video_callback_task",
@@ -647,6 +646,9 @@ class DailyTransportClient(EventHandler):
 
     async def _join(self):
         """Execute the actual room join operation."""
+        if not self._client:
+            return
+
         future = self._get_event_loop().create_future()
 
         camera_enabled = self._params.video_out_enabled and self._params.camera_out_enabled
@@ -738,6 +740,9 @@ class DailyTransportClient(EventHandler):
 
     async def _leave(self):
         """Execute the actual room leave operation."""
+        if not self._client:
+            return
+
         future = self._get_event_loop().create_future()
         self._client.leave(completion=completion_callback(future))
         return await asyncio.wait_for(future, timeout=10)
@@ -798,6 +803,14 @@ class DailyTransportClient(EventHandler):
         Args:
             settings: DTMF settings including tones and target session.
         """
+        session_id = settings.get("sessionId") or self._dial_out_session_id
+        if not session_id:
+            logger.error("Unable to send DTMF: 'sessionId' is not set")
+            return
+
+        # Update 'sessionId' field.
+        settings["sessionId"] = session_id
+
         future = self._get_event_loop().create_future()
         self._client.send_dtmf(settings, completion=completion_callback(future))
         await future
@@ -1177,6 +1190,7 @@ class DailyTransportClient(EventHandler):
         Args:
             data: Dial-out connection data.
         """
+        self._dial_out_session_id = data["sessionId"] if "sessionId" in data else ""
         self._call_event_callback(self._callbacks.on_dialout_connected, data)
 
     def on_dialout_stopped(self, data: Any):
@@ -1185,6 +1199,9 @@ class DailyTransportClient(EventHandler):
         Args:
             data: Dial-out stop data.
         """
+        # Cleanup only if our session stopped.
+        if data["sessionId"] == self._dial_out_session_id:
+            self._dial_out_session_id = ""
         self._call_event_callback(self._callbacks.on_dialout_stopped, data)
 
     def on_dialout_error(self, data: Any):
@@ -1193,6 +1210,9 @@ class DailyTransportClient(EventHandler):
         Args:
             data: Dial-out error data.
         """
+        # Cleanup only if our session errored out.
+        if data["sessionId"] == self._dial_out_session_id:
+            self._dial_out_session_id = ""
         self._call_event_callback(self._callbacks.on_dialout_error, data)
 
     def on_dialout_warning(self, data: Any):
@@ -1329,10 +1349,13 @@ class DailyTransportClient(EventHandler):
 
     def _call_async_callback(self, queue: asyncio.Queue, callback, *args):
         """Queue a callback for async execution on the event loop."""
-        future = asyncio.run_coroutine_threadsafe(
-            queue.put((callback, *args)), self._get_event_loop()
-        )
-        future.result()
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                queue.put((callback, *args)), self._get_event_loop()
+            )
+            future.result()
+        except FuturesCancelledError:
+            pass
 
     async def _callback_task_handler(self, queue: asyncio.Queue):
         """Handle queued callbacks from the specified queue."""
