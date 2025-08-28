@@ -410,11 +410,8 @@ class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
     async def push_aggregation(self):
         if len(self._aggregation) > 0:
             aggregation = self._aggregation
-
             await self.reset()
-
             await self.handle_aggregation(aggregation)
-
             frame = OpenAILLMContextFrame(self._context)
             await self.push_frame(frame)
 
