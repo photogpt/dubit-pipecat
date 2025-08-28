@@ -78,6 +78,7 @@ class AzureSTTService(STTService):
             language: Language for speech recognition. Defaults to English (US).
             sample_rate: Audio sample rate in Hz. If None, uses service default.
             endpoint_id: Custom model endpoint id.
+            vad_enabled: (Dubit) Whether to push VAD events
             **kwargs: Additional arguments passed to parent STTService.
         """
         super().__init__(sample_rate=sample_rate, **kwargs)

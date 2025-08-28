@@ -97,6 +97,7 @@ class OpenAILLMService(BaseOpenAILLMService):
             context: The LLM context to create aggregators for.
             user_params: Parameters for user message aggregation.
             assistant_params: Parameters for assistant message aggregation.
+            aggregator_type: "pipecat"(default) or "dubit"
 
         Returns:
             OpenAIContextAggregatorPair: A pair of context aggregators, one for

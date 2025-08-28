@@ -904,6 +904,11 @@ class DailyTransportClient(EventHandler):
             logger.error(f"Unable to stop transcription: {error}")
 
     async def subscribe_to_participant_audio(self, participant_id: str):
+        """Subscribe to a specific participant's audio
+
+        Args:
+            participant_id: ID of the participant to subscribe to
+        """
         await self.update_subscriptions({participant_id: {"media": {"microphone": "subscribed"}}})
 
     async def send_prebuilt_chat_message(self, message: str, user_name: Optional[str] = None):
@@ -2084,6 +2089,11 @@ class DailyTransport(BaseTransport):
         await self._client.stop_recording(stream_id)
 
     async def update_subscription(self, participant_id):
+        """Update subscription to a participant
+
+        Args:
+            participant_id: ID of teh participant to subscribe to
+        """
         logger.info(f"Subscribing to {participant_id}'s audio")
         await self._client.subscribe_to_participant_audio(participant_id)
 

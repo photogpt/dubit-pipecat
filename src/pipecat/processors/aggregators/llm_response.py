@@ -373,6 +373,11 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
 
 
 class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
+    """Dubit version of LLMUserContextAggregator based on our VAD Startegy
+
+    This aggregator used DubitUserStarted/StoppedSpeakingFrame(s) instead of
+    Pipecat's original UserStarted/StoppedSpeakingFrame based on our VAD strategy.
+    """
     def __init__(
         self,
         context: OpenAILLMContext,
@@ -380,12 +385,26 @@ class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
         params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
         **kwargs,
     ):
+        """Initialize the DubitUserContextAggregator
+
+        Args:
+            context: The OpenAI LLM context for conversation storage.
+            params: Configuration parameters for aggregation behavior.
+            **kwargs: Additional arguments. Supports deprecated 'aggregation_timeout'.
+        """
         super().__init__(context=context, role="user", **kwargs)
 
     async def reset(self):
+        """Reset the aggregation state and interruption strategies."""
         await super().reset()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames for user speech aggregation and context management.
+
+        Args:
+            frame: The frame to process.
+            direction: The direction of frame flow in the pipeline.
+        """
         await super().process_frame(frame, direction)
 
         if isinstance(frame, DubitUserStartedSpeakingFrame):
@@ -405,9 +424,15 @@ class DubitLLMUserContextAggregator(LLMContextResponseAggregator):
             await self.push_frame(frame, direction)
 
     async def handle_aggregation(self, aggregation: str):
+        """Add the aggregated user text to the context.
+
+        Args:
+            aggregation: The aggregated user text to add as a user message.
+        """
         self._context.add_message({"role": self.role, "content": aggregation})
 
     async def push_aggregation(self):
+        """Push the current aggregation based on interruption strategies and conditions."""
         if len(self._aggregation) > 0:
             aggregation = self._aggregation
             await self.reset()

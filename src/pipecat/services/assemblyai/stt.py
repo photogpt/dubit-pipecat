@@ -78,6 +78,7 @@ class AssemblyAISTTService(STTService):
             api_endpoint_base_url: WebSocket endpoint URL. Defaults to AssemblyAI's streaming endpoint.
             connection_params: Connection configuration parameters. Defaults to AssemblyAIConnectionParams().
             vad_force_turn_endpoint: Whether to force turn endpoint on VAD stop. Defaults to True.
+            vad_enabled: (Dubit) Whether to push VAD events
             **kwargs: Additional arguments passed to parent STTService class.
         """
         self._api_key = api_key
