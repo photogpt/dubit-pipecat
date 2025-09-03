@@ -13,12 +13,12 @@ supporting multiple languages, custom vocabulary, and various audio processing o
 import asyncio
 import base64
 import json
-import warnings
 from typing import Any, AsyncGenerator, Dict, Literal, Optional
 
 import aiohttp
 from loguru import logger
 
+from pipecat import __version__ as pipecat_version
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
@@ -175,12 +175,16 @@ class _InputParamsDescriptor:
     """Descriptor for backward compatibility with deprecation warning."""
 
     def __get__(self, obj, objtype=None):
-        warnings.warn(
-            "GladiaSTTService.InputParams is deprecated and will be removed in a future version. "
-            "Import and use GladiaInputParams directly instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn(
+                "GladiaSTTService.InputParams is deprecated and will be removed in a future version. "
+                "Import and use GladiaInputParams directly instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return GladiaInputParams
 
 
@@ -238,12 +242,14 @@ class GladiaSTTService(STTService):
 
         # Warn about deprecated language parameter if it's used
         if params.language is not None:
-            warnings.warn(
-                "The 'language' parameter is deprecated and will be removed in a future version. "
-                "Use 'language_config' instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(
+                    "The 'language' parameter is deprecated and will be removed in a future version. "
+                    "Use 'language_config' instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
 
         self._api_key = api_key
         self._region = region
@@ -303,8 +309,8 @@ class GladiaSTTService(STTService):
         }
 
         # Add custom_metadata if provided
-        if self._params.custom_metadata:
-            settings["custom_metadata"] = self._params.custom_metadata
+        settings["custom_metadata"] = dict(self._params.custom_metadata or {})
+        settings["custom_metadata"]["pipecat"] = pipecat_version
 
         # Add endpointing parameters if provided
         if self._params.endpointing is not None:
@@ -430,6 +436,7 @@ class GladiaSTTService(STTService):
                     response = await self._setup_gladia(settings)
                     self._session_url = response["url"]
                     self._reconnection_attempts = 0
+                    logger.info(f"Session URL : {self._session_url}")
 
                 # Connect with automatic reconnection
                 async with websocket_connect(self._session_url) as websocket:

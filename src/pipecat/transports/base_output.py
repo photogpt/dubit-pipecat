@@ -19,6 +19,7 @@ from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional
 from loguru import logger
 from PIL import Image
 
+from pipecat.audio.dtmf.utils import load_dtmf_audio
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.audio.utils import create_stream_resampler, is_silence
 from pipecat.frames.frames import (
@@ -38,7 +39,6 @@ from pipecat.frames.frames import (
     SpriteFrame,
     StartFrame,
     StartInterruptionFrame,
-    StopInterruptionFrame,
     SystemFrame,
     TransportMessageFrame,
     TransportMessageUrgentFrame,
@@ -223,7 +223,12 @@ class BaseOutputTransport(FrameProcessor):
         Args:
             frame: The DTMF frame to write.
         """
-        pass
+        dtmf_audio = await load_dtmf_audio(frame.button, sample_rate=self._sample_rate)
+        dtmf_audio_frame = OutputAudioRawFrame(
+            audio=dtmf_audio, sample_rate=self._sample_rate, num_channels=1
+        )
+        dtmf_audio_frame.transport_destination = frame.transport_destination
+        await self.write_audio_frame(dtmf_audio_frame)
 
     async def send_audio(self, frame: OutputAudioRawFrame):
         """Send an audio frame downstream.
@@ -267,7 +272,7 @@ class BaseOutputTransport(FrameProcessor):
         elif isinstance(frame, CancelFrame):
             await self.cancel(frame)
             await self.push_frame(frame, direction)
-        elif isinstance(frame, (StartInterruptionFrame, StopInterruptionFrame)):
+        elif isinstance(frame, StartInterruptionFrame):
             await self.push_frame(frame, direction)
             await self._handle_frame(frame)
         elif isinstance(frame, TransportMessageUrgentFrame):

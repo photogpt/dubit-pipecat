@@ -9,6 +9,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added support for WhatsApp User-initiated Calls.
+
+- Added new audio filter `AICFilter`, speech enhancement for improving VAD/STT
+  performance, no ONNX dependency.
+  See https://ai-coustics.com/sdk/
+
+- Added a timeout around cancel input tasks to prevent indefinite hangs when
+  cancellation is swallowed by third-party code.
+
+- Added `pipecat.extensions.ivr` for automated IVR system navigation with
+  configurable goals and conversation handling. Supports DTMF input, verbal
+  responses, and intelligent menu traversal.
+
+  Basic usage:
+
+  ```python
+  from pipecat.extensions.ivr.ivr_navigator import IVRNavigator
+
+  # Create IVR navigator with your goal
+  ivr_navigator = IVRNavigator(
+      llm=llm_service,
+      ivr_prompt="Navigate to billing department to dispute a charge"
+  )
+
+  # Handle different outcomes
+  @ivr_navigator.event_handler("on_conversation_detected")
+  async def on_conversation(processor, conversation_history):
+      # Switch to normal conversation mode
+      pass
+
+  @ivr_navigator.event_handler("on_ivr_status_changed")
+  async def on_ivr_status(processor, status):
+      if status == IVRStatus.COMPLETED:
+          # End pipeline, transfer call, or start bot conversation
+      elif status == IVRStatus.STUCK:
+          # Handle navigation failure
+  ```
+
+- `BaseOutputTransport` now implements `write_dtmf()` by loading DTMF audio and
+  sending it through the transport. This makes sending DTMF generic across all
+  output transports.
+
+- Added new config parameters to `GladiaSTTService`.
+  - PreProcessingConfig > `audio_enhancer` to enhance audio quality.
+  - CustomVocabularyItem > `pronunciations` and `language` to specify special pronunciations and in which language it will be pronounced.
+
+### Changed
+
+- Added `sip_codecs` to the `DailyRoomSipParams`.
+
+- Updated the `configure()` function in `pipecat.runner.daily` to include new
+  args to create SIP-enabled rooms. Additionally, added new args to control the
+  room and token expiration durations.
+
+- `pipecat.frames.frames.KeypadEntry` is deprecated and has been moved to
+  `pipecat.audio.dtmf.types.KeypadEntry`.
+
+- Updated `RimeTTSService`'s flush_audio message to conform with Rime's official API.
+
+### Removed
+
+- Remove `StopInterruptionFrame`. This was a legacy frame that was not being
+  used really anywhere and it didn't provide any useful meaning. It was only
+  pushed after `UserStoppedSpeakingFrame`, so developers can just use
+  `UserStoppedSpeakingFrame`.
+
+- `DailyTransport.write_dtmf()` has been removed in favor of the generic
+  `BaseOutputTransport.write_dtmf()`.
+
+- Remove deprecated `DailyTransport.send_dtmf()`.
+
+### Deprecated
+
+- `pipecat.frames.frames.KeypadEntry` is deprecated use
+  `pipecat.audio.dtmf.types.KeypadEntry` instead.
+
+### Fixed
+
+- Fixed `SmallWebRTCTransport` to not use `mid` to decide if the transceiver should
+  be `sendrecv` or not.
+
+- Fixed an issue where Deepgram swallowed `asyncio.CancelledError` during
+  disconnect, preventing tasks from being cancelled.
+
+- Fixed an issue where `PipelineTask` was not cleaning up the observers.
+
+### Performance
+
+- Reduced latency and improved memory performance in `Mem0MemoryService`.
+
+## [0.0.82] - 2025-08-28
+
+### Added
+
+- Added a new `LLMRunFrame` to trigger an LLM response:
+
+  ```python
+  await task.queue_frames([LLMRunFrame()])
+  ```
+
+  This replaces `OpenAILLMContextFrame`, which you’d previously typically use
+  like this:
+
+  ```python
+  await task.queue_frames([context_aggregator.user().get_context_frame()])
+  ```
+
+  Use this way of kicking off your conversation when you’ve already initialized
+  your context and are simply instructing the bot when to go:
+
+  ```python
+  context = OpenAILLMContext(messages, tools)
+  context_aggregator = llm.create_context_aggregator(context)
+
+  # ...
+
+  @transport.event_handler("on_client_connected")
+  async def on_client_connected(transport, client):
+      # Kick off the conversation.
+      await task.queue_frames([LLMRunFrame()])
+  ```
+
+  Note that if you want to add new messages when kicking off the conversation,
+  you could use `LLMMessagesAppendFrame` with `run_llm=True` instead:
+
+  ```python
+  @transport.event_handler("on_client_connected")
+  async def on_client_connected(transport, client):
+      # Kick off the conversation.
+      await task.queue_frames([LLMMessagesAppendFrame(new_messages, run_llm=True)])
+  ```
+
+  In the rare case you don’t have a context aggregator in your pipeline, then
+  you may continue using a context frame.
+
 - Added support for switching between audio+text to text-only modes within the
   same pipeline. This is done by pushing
   `LLMConfigureOutputFrame(skip_tts=True)` to enter text-only mode, and
