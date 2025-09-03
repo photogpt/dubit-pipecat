@@ -147,7 +147,11 @@ else
 fi
 
 current_date=$(date +%Y-%m-%d)
-tag="v${latest_version}+custom-${current_date}"
+if [ "$has_unreleased" = true ]; then
+	tag="v${latest_version}+dubit-beta-${current_date}"
+else
+	tag="v${latest_version}+dubit-${current_date}"
+fi
 
 echo "Preparing tag: $tag"
 
