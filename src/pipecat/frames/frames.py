@@ -927,6 +927,16 @@ class DubitUserStoppedSpeakingFrame(Frame):
 
 
 @dataclass
+class UserSpeakingFrame(SystemFrame):
+    """Frame indicating the user is speaking.
+
+    Emitted by VAD to indicate the user is speaking.
+    """
+
+    pass
+
+
+@dataclass
 class EmulateUserStartedSpeakingFrame(SystemFrame):
     """Frame to emulate user started speaking behavior.
 
@@ -1172,6 +1182,23 @@ class CustomAssistantTranscriptionFrame(Frame):
 
     def __str__(self):
         return f"{self.name}(text: [{self.text}], timestamp: {self.timestamp})"
+
+
+@dataclass
+class InputTransportMessageUrgentFrame(TransportMessageUrgentFrame):
+    """Frame for transport messages received from external sources.
+
+    This frame wraps incoming transport messages to distinguish them from outgoing
+    urgent transport messages (TransportMessageUrgentFrame), preventing infinite
+    message loops in the transport layer. It inherits the message payload from
+    TransportMessageFrame while marking the message as having been received
+    rather than generated locally.
+
+    Used by transport implementations to properly handle bidirectional message
+    flow without creating feedback loops.
+    """
+
+    pass
 
 
 @dataclass

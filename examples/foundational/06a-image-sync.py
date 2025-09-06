@@ -29,7 +29,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.transports.services.daily import DailyParams
+from pipecat.transports.daily.transport import DailyParams
 
 load_dotenv(override=True)
 
@@ -66,7 +66,7 @@ class ImageSyncAggregator(FrameProcessor):
                 )
             )
 
-        await self.push_frame(frame)
+        await self.push_frame(frame, direction)
 
 
 # We store functions so objects (e.g. SileroVADAnalyzer) don't get

@@ -113,15 +113,6 @@ class OpenAILLMService(BaseOpenAILLMService):
         assistant = OpenAIAssistantContextAggregator(context, params=assistant_params)
         return OpenAIContextAggregatorPair(_user=user, _assistant=assistant)
 
-    @property
-    def supports_universal_context(self) -> bool:
-        """Check if this service supports universal LLMContext.
-
-        Returns:
-            True, as OpenAI service supports universal LLMContext.
-        """
-        return True
-
 
 class DubitOpenAIUserContextAggregator(DubitLLMUserContextAggregator):
     """Just a wrapper for DubitLLMUserContextAggregator."""

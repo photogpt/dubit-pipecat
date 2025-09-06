@@ -5,9 +5,66 @@ All notable changes to **Pipecat** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.84] - 2025-09-05
 
 ### Added
+
+- Add the ability to send DTMF to `LiveKitTransport`.
+
+- Expanded support for universal `LLMContext` to the Anthropic LLM service.
+  Using the universal `LLMContext` and associated `LLMContextAggregatorPair` is
+  a pre-requisite for using `LLMSwitcher` to switch between LLMs at runtime.
+
+### Changed
+
+- Updated `daily-python` to 0.19.9.
+
+- Restored `DailyTransport`'s native DTMF support using Daily's `send_dtmf()`
+  method instead of generated audio tones.
+
+### Fixed
+
+- Fixed a `AWSBedrockLLMService` crash caused by an extra `await`.
+
+- Fixed a `OpenAIImageGenService` issue where it was not creating
+  `URLImageRawFrame` correctly.
+
+## [0.0.83] - 2025-09-03
+
+### Added
+
+- Added multilingual support for AsyncAI in `AsyncAITTSService` and `AsyncAIHttpTTSService`.
+
+  - New `languages`: `es`, `fr`, `de`, `it`.
+
+- Added new frames `InputTransportMessageUrgentFrame` and
+  `DailyInputTransportMessageUrgentFrame` for transport messages received from
+  external sources.
+
+- Added `UserSpeakingFrame`. This will be sent upstream and downstream while VAD
+  detects the user is speaking.
+
+- Expanded support for universal `LLMContext` to more LLM services. Using the
+  universal `LLMContext` and associated `LLMContextAggregatorPair` is a
+  pre-requisite for using `LLMSwitcher` to switch between LLMs at runtime.
+  Here are the newly-supported services:
+
+  - Azure
+  - Cerebras
+  - Deepseek
+  - Fireworks AI
+  - Google Vertex AI
+  - Grok
+  - Groq
+  - Mistral
+  - NVIDIA NIM
+  - Ollama
+  - OpenPipe
+  - OpenRouter
+  - Perplexity
+  - Qwen
+  - SambaNova
+  - Together.ai
 
 - Added support for WhatsApp User-initiated Calls.
 
@@ -53,9 +110,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added new config parameters to `GladiaSTTService`.
   - PreProcessingConfig > `audio_enhancer` to enhance audio quality.
-  - CustomVocabularyItem > `pronunciations` and `language` to specify special pronunciations and in which language it will be pronounced.
+  - CustomVocabularyItem > `pronunciations` and `language` to specify special
+    pronunciations and in which language it will be pronounced.
 
 ### Changed
+
+- `UserStartedSpeakingFrame` and `UserStoppedSpeakingFrame` are also pushed
+  upstream.
+
+- `ParallelPipeline` now waits for `CancelFrame` to finish in all branches
+  before pushing it downstream.
 
 - Added `sip_codecs` to the `DailyRoomSipParams`.
 
@@ -66,7 +130,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pipecat.frames.frames.KeypadEntry` is deprecated and has been moved to
   `pipecat.audio.dtmf.types.KeypadEntry`.
 
-- Updated `RimeTTSService`'s flush_audio message to conform with Rime's official API.
+- Updated `RimeTTSService`'s flush_audio message to conform with Rime's official
+  API.
+
+- Updated the default model for `CerebrasLLMService` to GPT-OSS-120B.
 
 ### Removed
 
@@ -82,10 +149,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
+- Transports have been re-organized.
+
+  ```
+  pipecat.transports.network.small_webrtc        -> pipecat.transports.smallwebrtc.transport
+  pipecat.transports.network.webrtc_connection   -> pipecat.transports.smallwebrtc.connection
+  pipecat.transports.network.websocket_client    -> pipecat.transports.websocket.client
+  pipecat.transports.network.websocket_server    -> pipecat.transports.websocket.server
+  pipecat.transports.network.fastapi_websocket   -> pipecat.transports.websocket.fastapi
+  pipecat.transports.services.daily              -> pipecat.transports.daily.transport
+  pipecat.transports.services.helpers.daily_rest -> pipecat.transports.daily.utils
+  pipecat.transports.services.livekit            -> pipecat.transports.livekit.transport
+  pipecat.transports.services.tavus              -> pipecat.transports.tavus.transport
+  ```
+
 - `pipecat.frames.frames.KeypadEntry` is deprecated use
   `pipecat.audio.dtmf.types.KeypadEntry` instead.
 
 ### Fixed
+
+- Fixed an issue where messages received from the transport were always being resent.
 
 - Fixed `SmallWebRTCTransport` to not use `mid` to decide if the transceiver should
   be `sendrecv` or not.

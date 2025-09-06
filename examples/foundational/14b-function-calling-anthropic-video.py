@@ -30,7 +30,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.transports.services.daily import DailyParams
+from pipecat.transports.daily.transport import DailyParams
 
 load_dotenv(override=True)
 
@@ -97,7 +97,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     llm = AnthropicLLMService(
         api_key=os.getenv("ANTHROPIC_API_KEY"),
         model="claude-3-7-sonnet-latest",
-        enable_prompt_caching_beta=True,
+        params=AnthropicLLMService.InputParams(enable_prompt_caching=True),
     )
     llm.register_function("get_weather", get_weather)
     llm.register_function("get_image", get_image)

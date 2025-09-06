@@ -245,16 +245,11 @@ class BaseOpenAILLMService(LLMService):
         params.update(self._settings["extra"])
         return params
 
-    async def run_inference(
-        self, context: LLMContext | OpenAILLMContext, system_instruction: Optional[str] = None
-    ) -> Optional[str]:
+    async def run_inference(self, context: LLMContext | OpenAILLMContext) -> Optional[str]:
         """Run a one-shot, out-of-band (i.e. out-of-pipeline) inference with the given LLM context.
 
         Args:
             context: The LLM context containing conversation history.
-            system_instruction: Optional system instruction to guide the LLM's
-              behavior. You could also (again, optionally) provide a system
-              instruction directly in the context.
 
         Returns:
             The LLM's response as a string, or None if no response is generated.
@@ -278,9 +273,9 @@ class BaseOpenAILLMService(LLMService):
     async def _stream_chat_completions_specific_context(
         self, context: OpenAILLMContext
     ) -> AsyncStream[ChatCompletionChunk]:
-        # logger.debug(
-        #     f"{self}: Generating chat from OpenAI context {context.get_messages_for_logging()}"
-        # )
+        logger.debug(
+            f"{self}: Generating chat from LLM-specific context {context.get_messages_for_logging()}"
+        )
 
         messages: List[ChatCompletionMessageParam] = context.get_messages()
 
@@ -419,18 +414,6 @@ class BaseOpenAILLMService(LLMService):
 
             await self.run_function_calls(function_calls)
 
-    @property
-    def supports_universal_context(self) -> bool:
-        """Check if this service supports universal LLMContext.
-
-        Returns:
-            Whether service supports universal LLMContext.
-        """
-        # Return True in subclasses that support universal LLMContext
-        # This property lets us gradually roll out support for universal
-        # LLMContext to OpenAI-like services in a controlled manner.
-        return False
-
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames for LLM completion requests.
 
@@ -450,12 +433,7 @@ class BaseOpenAILLMService(LLMService):
             context = frame.context
         elif isinstance(frame, LLMContextFrame):
             # Handle universal (LLM-agnostic) LLM context frames
-            if self.supports_universal_context:
-                context = frame.context
-            else:
-                raise NotImplementedError(
-                    f"Universal LLMContext is not yet supported for {self.__class__.__name__}."
-                )
+            context = frame.context
         elif isinstance(frame, LLMMessagesFrame):
             # NOTE: LLMMessagesFrame is deprecated, so we don't support the newer universal
             # LLMContext with it

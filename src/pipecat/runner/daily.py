@@ -43,7 +43,7 @@ import aiohttp
 from loguru import logger
 from pydantic import BaseModel
 
-from pipecat.transports.services.helpers.daily_rest import (
+from pipecat.transports.daily.utils import (
     DailyRESTHelper,
     DailyRoomParams,
     DailyRoomProperties,
@@ -54,7 +54,7 @@ from pipecat.transports.services.helpers.daily_rest import (
 class DailyRoomConfig(BaseModel):
     """Configuration returned when creating a Daily room.
 
-    Attributes:
+    Parameters:
         room_url: The Daily room URL for joining the meeting.
         token: Authentication token for the bot to join the room.
         sip_endpoint: SIP endpoint URI for phone connections (None for standard rooms).
