@@ -1565,7 +1565,7 @@ class DailyInputTransport(BaseInputTransport):
             message: The message data to send.
             sender: ID of the message sender.
         """
-        frame = DailyTransportMessageUrgentFrame(message=message, participant_id=sender)
+        frame = DailyInputTransportMessageUrgentFrame(message=message, participant_id=sender)
         await self.push_frame(frame)
 
     #
