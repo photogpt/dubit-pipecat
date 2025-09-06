@@ -155,6 +155,21 @@ fi
 
 echo "Preparing tag: $tag"
 
+# Add a patch counter if the tag already exists
+if git tag | grep -q "^${tag}$"; then
+    echo "Tag $tag already exists."
+    # Initialize counter for unique identifier
+    counter=1
+    new_tag="${tag}-${counter}"
+    # Find the next available tag by incrementing the counter
+    while git tag | grep -q "^${new_tag}$"; do
+        counter=$((counter + 1))
+        new_tag="${tag}-${counter}"
+    done
+    tag="$new_tag"
+    echo "Using new tag: $tag"
+fi
+
 read -p "Confirm and push tag? (y / (default) n): " confirm
 if [ "$confirm" != "y" ]; then
 	echo "Exiting."
