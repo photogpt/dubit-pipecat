@@ -151,7 +151,6 @@ class AzureSTTService(STTService):
         self._speech_recognizer = SpeechRecognizer(
             speech_config=self._speech_config, audio_config=audio_config
         )
-
         self._speech_recognizer.recognizing.connect(self._on_handle_recognizing)
         self._speech_recognizer.recognized.connect(self._on_handle_recognized)
         self._speech_recognizer.start_continuous_recognition_async()
@@ -197,12 +196,10 @@ class AzureSTTService(STTService):
         await self.stop_processing_metrics()
 
     async def _frame_dispatcher(self, frame, frame_type):
-        if frame_type == "final":
-            if self.vad_enabled:
-                await self.push_frame(UserStartedSpeakingFrame())
+        if frame_type == "final" and self.vad_enabled:
+            await self.push_frame(UserStartedSpeakingFrame())
             await self.push_frame(frame)
-            if self.vad_enabled:
-                await self.push_frame(UserStoppedSpeakingFrame())
+            await self.push_frame(UserStoppedSpeakingFrame())
         else:
             await self.push_frame(frame)
 
@@ -225,7 +222,14 @@ class AzureSTTService(STTService):
 
     def _on_handle_recognizing(self, event):
         if event.result.reason == ResultReason.RecognizingSpeech and len(event.result.text) > 0:
-            frame = InterimTranscriptionFrame(event.result.text, "", time_now_iso8601())
+            language = getattr(event.result, "language", None) or self._settings.get("language")
+            frame = InterimTranscriptionFrame(
+                event.result.text,
+                self._user_id,
+                time_now_iso8601(),
+                language,
+                result=event,
+            )
             asyncio.run_coroutine_threadsafe(
                 self._frame_dispatcher(frame, "interim"), self.get_event_loop()
             )
