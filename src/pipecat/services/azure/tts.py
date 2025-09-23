@@ -7,7 +7,8 @@
 """Azure Cognitive Services Text-to-Speech service implementations."""
 
 import asyncio
-from typing import AsyncGenerator, Optional
+import re
+from typing import AsyncGenerator, List, Optional, Tuple
 
 from loguru import logger
 from pydantic import BaseModel
@@ -170,7 +171,7 @@ class AzureBaseTTSService(TTSService):
         language = self._settings["language_code"]
 
         # Escape special characters
-        escaped_text = self._escape_text(text)
+        escaped_text = self._escape_text_with_tag_support(text, [("<say-as>", "</say-as>")])
 
         ssml = (
             f"<speak version='1.0' xml:lang='{language}' "
@@ -214,6 +215,85 @@ class AzureBaseTTSService(TTSService):
         ssml += "</voice></speak>"
 
         return ssml
+
+    def _escape_text_with_tag_support(
+        self, text: str, tag_pairs: Optional[List[Tuple[str, str]]] = None
+    ) -> str:
+        """Extends self._escape_text with support for text containing tags like <say-as>...</say-as>.
+
+        Escaping is applied only to text outside of the specified tag pairs (including
+        the tags themselves, which are left unescaped). Assumes no nesting of the same
+        tag type and properly paired tags. Unmatched opening tags are treated as plain
+        text and escaped. Stray closing tags are escaped as plain text.
+
+        Args:
+            text: The text to escape.
+            tag_pairs: List of (start_tag_example, end_tag_example) tuples, e.g.,
+                       [("<say-as>", "</say-as>"), ("<abc>", "</abc>")].
+
+        Returns:
+            The escaped text.
+        """
+        if not text:
+            return text
+
+        if tag_pairs is None:
+            return self._escape_text(text)
+
+        # Build regexes for each pair
+        tag_configs = []
+        _SIMPLE_TAG_PATTERN = re.compile(r"^<([a-zA-Z0-9_:-]+)>$")
+
+        for start_ex, end_ex in tag_pairs:
+            simple_match = _SIMPLE_TAG_PATTERN.match(start_ex)
+            if not simple_match:
+                continue
+            tag_name = simple_match.group(1)
+            start_regex = re.compile(rf"<{re.escape(tag_name)}(?:\s+[^>]*)?>")
+            end_regex = re.compile(rf"</{re.escape(tag_name)}\s*>")
+            tag_configs.append((start_regex, end_regex))
+
+        if not tag_configs:
+            return self._escape_text(text)
+
+        escaped_parts = []
+        current_pos = 0
+        while current_pos < len(text):
+            # Find the next start of any type after current_pos
+            next_start = None
+            next_start_pos = float("inf")
+            next_config_idx = -1
+            for idx, (start_regex, _) in enumerate(tag_configs):
+                match = start_regex.search(text, current_pos)
+                if match and match.start() < next_start_pos:
+                    next_start_pos = match.start()
+                    next_start = match
+                    next_config_idx = idx
+
+            if next_start is None:
+                # No more starts, escape the rest
+                escaped_parts.append(self._escape_text(text[current_pos:]))
+                break
+
+            # Append escaped up to it
+            escaped_parts.append(self._escape_text(text[current_pos : next_start.start()]))
+
+            # Now, get the config
+            start_regex, end_regex = tag_configs[next_config_idx]
+
+            # Search for end after this start's end
+            end_match = end_regex.search(text, next_start.end())
+            if end_match and end_match.start() >= next_start.end():
+                # Matched, append raw from start to end
+                escaped_parts.append(text[next_start.start() : end_match.end()])
+                current_pos = end_match.end()
+            else:
+                # No match, escape the start tag itself
+                start_tag_text = text[next_start.start() : next_start.end()]
+                escaped_parts.append(self._escape_text(start_tag_text))
+                current_pos = next_start.end()
+
+        return "".join(escaped_parts)
 
     def _escape_text(self, text: str) -> str:
         """Escapes XML/SSML reserved characters according to Microsoft documentation.
