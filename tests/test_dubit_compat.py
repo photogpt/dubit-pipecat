@@ -8,9 +8,9 @@ import unittest
 from unittest.mock import AsyncMock
 
 from pipecat.frames.frames import (
-    DubitUserStartedSpeakingFrame,
-    DubitUserStoppedSpeakingFrame,
     TranscriptionFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
@@ -37,20 +37,20 @@ class TestDubitCompat(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.push_frame.await_count, 1)
         self.assertIs(service.push_frame.await_args_list[0].args[0], frame)
 
-    async def test_push_transcription_with_turn_frames_wraps_with_dubit_markers(self):
+    async def test_push_transcription_with_turn_frames_wraps_with_standard_markers(self):
         service = DummySTTService.__new__(DummySTTService)
         service.push_frame = AsyncMock()
         frame = TranscriptionFrame("hello", "user", "ts")
 
         await STTService._push_transcription_with_turn_frames(
-            service, frame, use_dubit_frames=True
+            service, frame, wrap_with_turn_frames=True
         )
 
         calls = service.push_frame.await_args_list
         self.assertEqual(len(calls), 3)
-        self.assertIsInstance(calls[0].args[0], DubitUserStartedSpeakingFrame)
+        self.assertIsInstance(calls[0].args[0], UserStartedSpeakingFrame)
         self.assertIs(calls[1].args[0], frame)
-        self.assertIsInstance(calls[2].args[0], DubitUserStoppedSpeakingFrame)
+        self.assertIsInstance(calls[2].args[0], UserStoppedSpeakingFrame)
 
     async def test_llm_context_aggregator_pair_uses_dubit_strategies(self):
         pair = LLMContextAggregatorPair(LLMContext(), aggregator_type="dubit")
