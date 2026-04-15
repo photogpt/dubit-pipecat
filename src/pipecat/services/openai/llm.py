@@ -112,9 +112,9 @@ class OpenAILLMService(BaseOpenAILLMService):
     ) -> LLMContextAggregatorPair:
         """Create a universal context aggregator pair.
 
-        The optional ``aggregator_type="dubit"`` compatibility mode preserves
-        ordered Dubit user-turn frames by selecting Dubit external turn
-        strategies for the user aggregator.
+        App-specific turn strategies should be supplied explicitly via
+        ``user_params.user_turn_strategies`` rather than through framework-level
+        compatibility modes.
         """
 
         return LLMContextAggregatorPair(

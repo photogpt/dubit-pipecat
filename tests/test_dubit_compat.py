@@ -15,7 +15,6 @@ from pipecat.frames.frames import (
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.stt_service import STTService
-from pipecat.turns.user_turn_strategies import DubitExternalUserTurnStrategies
 
 
 class DummySTTService(STTService):
@@ -52,13 +51,10 @@ class TestDubitCompat(unittest.IsolatedAsyncioTestCase):
         self.assertIs(calls[1].args[0], frame)
         self.assertIsInstance(calls[2].args[0], UserStoppedSpeakingFrame)
 
-    async def test_llm_context_aggregator_pair_uses_dubit_strategies(self):
-        pair = LLMContextAggregatorPair(LLMContext(), aggregator_type="dubit")
-
-        self.assertIsInstance(
-            pair.user()._params.user_turn_strategies, DubitExternalUserTurnStrategies
-        )
-
     async def test_llm_context_aggregator_pair_rejects_unknown_aggregator_type(self):
         with self.assertRaisesRegex(ValueError, "Unknown aggregator_type"):
             LLMContextAggregatorPair(LLMContext(), aggregator_type="unknown")
+
+    async def test_llm_context_aggregator_pair_rejects_dubit_aggregator_type(self):
+        with self.assertRaisesRegex(ValueError, "Unknown aggregator_type"):
+            LLMContextAggregatorPair(LLMContext(), aggregator_type="dubit")

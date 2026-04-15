@@ -87,7 +87,6 @@ from pipecat.turns.user_stop import BaseUserTurnStopStrategy, UserTurnStoppedPar
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from pipecat.turns.user_turn_controller import UserTurnController
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
-from pipecat.turns.user_turn_strategies import DubitExternalUserTurnStrategies
 from pipecat.utils.context.llm_context_summarization import (
     LLMAutoContextSummarizationConfig,
     LLMContextSummarizationConfig,
@@ -1490,16 +1489,14 @@ class LLMContextAggregatorPair:
             context: The context to be managed by the aggregators.
             user_params: Parameters for the user context aggregator.
             assistant_params: Parameters for the assistant context aggregator.
-            aggregator_type: Aggregator compatibility mode. Use ``"dubit"``
-                to preserve ordered Dubit user-turn frame semantics.
+            aggregator_type: Aggregator compatibility mode. Only ``"pipecat"``
+                is supported at framework level.
         """
         user_params = user_params or LLMUserAggregatorParams()
         assistant_params = assistant_params or LLMAssistantAggregatorParams()
-        if aggregator_type == "dubit" and user_params.user_turn_strategies is None:
-            user_params.user_turn_strategies = DubitExternalUserTurnStrategies()
-        elif aggregator_type != "pipecat" and aggregator_type != "dubit":
+        if aggregator_type != "pipecat":
             raise ValueError(
-                f"Unknown aggregator_type '{aggregator_type}'. Expected 'pipecat' or 'dubit'."
+                f"Unknown aggregator_type '{aggregator_type}'. Expected 'pipecat'."
             )
         self._user = LLMUserAggregator(context, params=user_params)
         self._assistant = LLMAssistantAggregator(context, params=assistant_params)

@@ -12,14 +12,12 @@ from typing import List, Optional
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.turns.user_start import (
     BaseUserTurnStartStrategy,
-    DubitExternalUserTurnStartStrategy,
     ExternalUserTurnStartStrategy,
     TranscriptionUserTurnStartStrategy,
     VADUserTurnStartStrategy,
 )
 from pipecat.turns.user_stop import (
     BaseUserTurnStopStrategy,
-    DubitExternalUserTurnStopStrategy,
     ExternalUserTurnStopStrategy,
     TurnAnalyzerUserTurnStopStrategy,
 )
@@ -97,12 +95,3 @@ class ExternalUserTurnStrategies(UserTurnStrategies):
     def __post_init__(self):
         self.start = [ExternalUserTurnStartStrategy()]
         self.stop = [ExternalUserTurnStopStrategy()]
-
-
-@dataclass
-class DubitExternalUserTurnStrategies(UserTurnStrategies):
-    """Default container for ordered Dubit user-turn start and stop strategies."""
-
-    def __post_init__(self):
-        self.start = [DubitExternalUserTurnStartStrategy()]
-        self.stop = [DubitExternalUserTurnStopStrategy()]

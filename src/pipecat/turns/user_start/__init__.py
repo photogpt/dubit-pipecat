@@ -5,7 +5,6 @@
 #
 
 from .base_user_turn_start_strategy import BaseUserTurnStartStrategy, UserTurnStartedParams
-from .dubit_external_user_turn_start_strategy import DubitExternalUserTurnStartStrategy
 from .external_user_turn_start_strategy import ExternalUserTurnStartStrategy
 from .min_words_user_turn_start_strategy import MinWordsUserTurnStartStrategy
 from .transcription_user_turn_start_strategy import TranscriptionUserTurnStartStrategy
@@ -14,7 +13,6 @@ from .wake_phrase_user_turn_start_strategy import WakePhraseUserTurnStartStrateg
 
 __all__ = [
     "BaseUserTurnStartStrategy",
-    "DubitExternalUserTurnStartStrategy",
     "ExternalUserTurnStartStrategy",
     "MinWordsUserTurnStartStrategy",
     "TranscriptionUserTurnStartStrategy",

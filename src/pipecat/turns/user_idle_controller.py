@@ -12,8 +12,6 @@ from typing import Optional
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
-    DubitUserStartedSpeakingFrame,
-    DubitUserStoppedSpeakingFrame,
     Frame,
     FunctionCallCancelFrame,
     FunctionCallResultFrame,
@@ -125,10 +123,10 @@ class UserIdleController(BaseObject):
                 await self._start_idle_timer()
         elif isinstance(frame, BotStartedSpeakingFrame):
             await self._cancel_idle_timer()
-        elif isinstance(frame, (UserStartedSpeakingFrame, DubitUserStartedSpeakingFrame)):
+        elif isinstance(frame, UserStartedSpeakingFrame):
             self._user_turn_in_progress = True
             await self._cancel_idle_timer()
-        elif isinstance(frame, (UserStoppedSpeakingFrame, DubitUserStoppedSpeakingFrame)):
+        elif isinstance(frame, UserStoppedSpeakingFrame):
             self._user_turn_in_progress = False
         elif isinstance(frame, FunctionCallsStartedFrame):
             self._function_calls_in_progress += len(frame.function_calls)
