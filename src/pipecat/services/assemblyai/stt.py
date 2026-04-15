@@ -154,6 +154,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         encoding: str = "pcm_s16le",
         connection_params: Optional[AssemblyAIConnectionParams] = None,
         vad_force_turn_endpoint: bool = True,
+        vad_enabled: bool = False,
         should_interrupt: bool = True,
         speaker_format: Optional[str] = None,
         settings: Optional[Settings] = None,
@@ -189,6 +190,8 @@ class AssemblyAISTTService(WebsocketSTTService):
                 - Uses AssemblyAI API defaults for all parameters (unless user explicitly sets them)
                 - Emits UserStarted/StoppedSpeakingFrame from STT
                 - No ForceEndpoint on VAD stop
+            vad_enabled: Dubit compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered Dubit turn frames.
             should_interrupt: Whether to interrupt the bot when the user starts speaking
                 in AssemblyAI turn detection mode (vad_force_turn_endpoint=False). Only applies
                 when using AssemblyAI's built-in turn detection. Defaults to True.
@@ -297,6 +300,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         self._vad_force_turn_endpoint = vad_force_turn_endpoint
         self._should_interrupt = should_interrupt
         self._speaker_format = speaker_format
+        self.vad_enabled = vad_enabled
 
         # Init-only audio config (not runtime-updatable)
         self._encoding = encoding
@@ -669,7 +673,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         Only applies when using AssemblyAI's built-in turn detection. When using
         Pipecat turn detection, VAD + smart turn analyzer handle interruptions.
         """
-        if self._vad_force_turn_endpoint:
+        if self._vad_force_turn_endpoint or self.vad_enabled:
             return  # Pipecat mode: handled by aggregator
 
         await self.start_processing_metrics()
@@ -742,14 +746,15 @@ class AssemblyAISTTService(WebsocketSTTService):
                 if finalize_confirmed:
                     self.confirm_finalize()
                 logger.debug(f'{self} Transcript: "{transcript_text}"')
-                await self.push_frame(
+                await self._push_transcription_with_turn_frames(
                     TranscriptionFrame(
                         transcript_text,
                         speaker_id,
                         time_now_iso8601(),
                         language,
                         message,
-                    )
+                    ),
+                    use_dubit_frames=self.vad_enabled,
                 )
                 await self._trace_transcription(transcript_text, True, language)
                 await self.stop_processing_metrics()
@@ -770,7 +775,7 @@ class AssemblyAISTTService(WebsocketSTTService):
             # so UserStartedSpeakingFrame is guaranteed to be broadcast first.
             if is_final_turn:
                 # AssemblyAI controls finalization, just mark as finalized
-                await self.push_frame(
+                await self._push_transcription_with_turn_frames(
                     TranscriptionFrame(
                         transcript_text,
                         speaker_id,
@@ -778,15 +783,17 @@ class AssemblyAISTTService(WebsocketSTTService):
                         language,
                         message,
                         finalized=True,
-                    )
+                    ),
+                    use_dubit_frames=self.vad_enabled,
                 )
                 await self._trace_transcription(transcript_text, True, language)
                 await self.stop_processing_metrics()
-                # AAI is authoritative — emit UserStoppedSpeakingFrame immediately.
-                # broadcast_frame pushes downstream (same queue as TranscriptionFrame
-                # above, so ordering is preserved) and upstream.
-                await self.broadcast_frame(UserStoppedSpeakingFrame)
-                self._user_speaking = False
+                if not self.vad_enabled:
+                    # AAI is authoritative — emit UserStoppedSpeakingFrame immediately.
+                    # broadcast_frame pushes downstream (same queue as TranscriptionFrame
+                    # above, so ordering is preserved) and upstream.
+                    await self.broadcast_frame(UserStoppedSpeakingFrame)
+                    self._user_speaking = False
                 await self._call_event_handler("on_end_of_turn", transcript_text)
             else:
                 await self.push_frame(

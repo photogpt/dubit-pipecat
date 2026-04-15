@@ -305,6 +305,7 @@ class DeepgramSTTService(STTService):
         mip_opt_out: Optional[bool] = None,
         live_options: Optional[LiveOptions] = None,
         addons: Optional[dict] = None,
+        vad_enabled: bool = False,
         settings: Optional[Settings] = None,
         ttfs_p99_latency: Optional[float] = DEEPGRAM_TTFS_P99,
         **kwargs,
@@ -331,6 +332,8 @@ class DeepgramSTTService(STTService):
                     fields and direct init parameters for connection-level config.
 
             addons: Additional Deepgram features to enable.
+            vad_enabled: Dubit compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered Dubit turn frames.
             settings: Runtime-updatable settings. When provided alongside
                 ``live_options``, ``settings`` values take precedence (applied
                 after the ``live_options`` merge).
@@ -420,6 +423,7 @@ class DeepgramSTTService(STTService):
         self._callback_method = callback_method
         self._tag = tag
         self._mip_opt_out = mip_opt_out
+        self.vad_enabled = vad_enabled
 
         # Build client - support optional custom base URL via DeepgramClientEnvironment
         if base_url:
@@ -672,14 +676,15 @@ class DeepgramSTTService(STTService):
                     from_finalize = getattr(message, "from_finalize", False) or False
                     if from_finalize:
                         self.confirm_finalize()
-                    await self.push_frame(
+                    await self._push_transcription_with_turn_frames(
                         TranscriptionFrame(
                             transcript,
                             self._user_id,
                             time_now_iso8601(),
                             language,
                             result=message,
-                        )
+                        ),
+                        use_dubit_frames=self.vad_enabled,
                     )
                     await self._handle_transcription(transcript, is_final, language)
                     await self.stop_processing_metrics()

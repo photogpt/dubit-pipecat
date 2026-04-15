@@ -226,6 +226,7 @@ class GladiaSTTService(WebsocketSTTService):
         sample_rate: Optional[int] = None,
         model: Optional[str] = None,
         params: Optional[GladiaInputParams] = None,
+        vad_enabled: bool = False,
         max_buffer_size: int = 1024 * 1024 * 20,  # 20MB default buffer
         should_interrupt: bool = True,
         settings: Optional[Settings] = None,
@@ -253,6 +254,8 @@ class GladiaSTTService(WebsocketSTTService):
                     Use ``settings=GladiaSTTService.Settings(...)`` for runtime-updatable
                     fields and direct init parameters for encoding/bit_depth/channels.
 
+            vad_enabled: Dubit compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered Dubit turn frames.
             max_buffer_size: Maximum size of audio buffer in bytes. Defaults to 20MB.
             should_interrupt: Determine whether the bot should be interrupted when
                 Gladia VAD detects user speech. Defaults to True.
@@ -341,6 +344,7 @@ class GladiaSTTService(WebsocketSTTService):
         # VAD state tracking
         self._is_speaking = False
         self._should_interrupt = should_interrupt
+        self.vad_enabled = vad_enabled
 
     def __str__(self):
         return f"{self.name} [{self._session_id}]"
@@ -597,6 +601,8 @@ class GladiaSTTService(WebsocketSTTService):
         Broadcasts UserStartedSpeakingFrame and optionally triggers interruption
         when VAD is enabled.
         """
+        if self.vad_enabled:
+            return
         if not self._settings.enable_vad or self._is_speaking:
             return
 
@@ -612,6 +618,8 @@ class GladiaSTTService(WebsocketSTTService):
 
         Broadcasts UserStoppedSpeakingFrame when VAD is enabled.
         """
+        if self.vad_enabled:
+            return
         if not self._settings.enable_vad or not self._is_speaking:
             return
         self._is_speaking = False
@@ -675,14 +683,15 @@ class GladiaSTTService(WebsocketSTTService):
                     transcript = utterance["text"]
                     is_final = content["data"]["is_final"]
                     if is_final:
-                        await self.push_frame(
+                        await self._push_transcription_with_turn_frames(
                             TranscriptionFrame(
                                 transcript,
                                 self._user_id,
                                 time_now_iso8601(),
                                 language,
                                 result=content,
-                            )
+                            ),
+                            use_dubit_frames=self.vad_enabled,
                         )
                         await self._handle_transcription(
                             transcript=transcript,

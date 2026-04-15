@@ -74,8 +74,10 @@ class AzureSTTService(STTService):
         *,
         api_key: str,
         region: Optional[str] = None,
-        language: Optional[Language] = Language.EN_US,
+        language: Optional[Language | str] = Language.EN_US,
+        language_code: Optional[str] = None,
         sample_rate: Optional[int] = None,
+        vad_enabled: bool = False,
         private_endpoint: Optional[str] = None,
         endpoint_id: Optional[str] = None,
         settings: Optional[Settings] = None,
@@ -93,7 +95,11 @@ class AzureSTTService(STTService):
                 .. deprecated:: 0.0.105
                     Use ``settings=AzureSTTService.Settings(language=...)`` instead.
 
+            language_code: Dubit compatibility alias for passing a raw Azure
+                language code such as ``"en-US"`` directly.
             sample_rate: Audio sample rate in Hz. If None, uses service default.
+            vad_enabled: Dubit compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered Dubit turn frames.
             private_endpoint: Private endpoint for STT behind firewall.
                 See https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-services-private-link?tabs=portal
             endpoint_id: Custom model endpoint id.
@@ -110,7 +116,9 @@ class AzureSTTService(STTService):
         )
 
         # 2. Apply direct init arg overrides (deprecated)
-        if language is not None and language != Language.EN_US:
+        if language_code is not None:
+            default_settings.language = language_code
+        elif language is not None and language != Language.EN_US:
             self._warn_init_param_moved_to_settings("language", "language")
             default_settings.language = language
 
@@ -126,6 +134,7 @@ class AzureSTTService(STTService):
             settings=default_settings,
             **kwargs,
         )
+        self.vad_enabled = vad_enabled
 
         recognition_language = default_settings.language or language_to_azure_language(
             Language.EN_US
@@ -290,7 +299,12 @@ class AzureSTTService(STTService):
             asyncio.run_coroutine_threadsafe(
                 self._handle_transcription(event.result.text, True, language), self.get_event_loop()
             )
-            asyncio.run_coroutine_threadsafe(self.push_frame(frame), self.get_event_loop())
+            asyncio.run_coroutine_threadsafe(
+                self._push_transcription_with_turn_frames(
+                    frame, use_dubit_frames=self.vad_enabled
+                ),
+                self.get_event_loop(),
+            )
 
     def _on_handle_recognizing(self, event):
         if event.result.reason == ResultReason.RecognizingSpeech and len(event.result.text) > 0:

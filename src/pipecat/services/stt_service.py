@@ -19,6 +19,8 @@ from websockets.protocol import State
 
 from pipecat.frames.frames import (
     AudioRawFrame,
+    DubitUserStartedSpeakingFrame,
+    DubitUserStoppedSpeakingFrame,
     ErrorFrame,
     Frame,
     InterruptionFrame,
@@ -452,6 +454,22 @@ class STTService(AIService):
             ttfs = DEFAULT_TTFS_P99
             logger.warning(f"{self.name}: ttfs_p99_latency not set, using default {ttfs}s")
         await self.broadcast_frame(STTMetadataFrame, service_name=self.name, ttfs_p99_latency=ttfs)
+
+    async def _push_transcription_with_turn_frames(
+        self, frame: TranscriptionFrame, *, use_dubit_frames: bool = False
+    ):
+        """Push a final transcription with optional ordered Dubit turn markers.
+
+        Dubit compatibility mode preserves the old fork behavior where a final
+        transcription is wrapped by regular ordered frames instead of relying on
+        upstream user-turn control frames.
+        """
+        if use_dubit_frames:
+            await self.push_frame(DubitUserStartedSpeakingFrame())
+            await self.push_frame(frame)
+            await self.push_frame(DubitUserStoppedSpeakingFrame())
+        else:
+            await self.push_frame(frame)
 
     async def _cancel_ttfb_timeout(self):
         """Cancel any pending TTFB timeout task."""
