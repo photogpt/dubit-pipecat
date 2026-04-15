@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -22,14 +22,16 @@ from pydantic import BaseModel
 
 from pipecat.frames.frames import (
     CancelFrame,
+    ClientConnectedFrame,
     EndFrame,
     Frame,
     InputAudioRawFrame,
+    InputTransportMessageFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
+    OutputTransportMessageFrame,
+    OutputTransportMessageUrgentFrame,
     StartFrame,
-    TransportMessageFrame,
-    TransportMessageUrgentFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.serializers.base_serializer import FrameSerializer
@@ -214,6 +216,8 @@ class WebsocketServerInputTransport(BaseInputTransport):
 
                 if isinstance(frame, InputAudioRawFrame):
                     await self.push_audio_frame(frame)
+                elif isinstance(frame, InputTransportMessageFrame):
+                    await self.broadcast_frame(InputTransportMessageFrame, message=frame.message)
                 else:
                     await self.push_frame(frame)
         except Exception as e:
@@ -338,7 +342,9 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
             await self._write_frame(frame)
             self._next_send_time = 0
 
-    async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+    async def send_message(
+        self, frame: OutputTransportMessageFrame | OutputTransportMessageUrgentFrame
+    ):
         """Send a transport message frame to the client.
 
         Args:
@@ -346,14 +352,17 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
         """
         await self._write_frame(frame)
 
-    async def write_audio_frame(self, frame: OutputAudioRawFrame):
+    async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Write an audio frame to the WebSocket client with timing control.
 
         Args:
             frame: The output audio frame to write.
+
+        Returns:
+            True if the audio frame was written successfully, False otherwise.
         """
         if not self._websocket:
-            return
+            return False
 
         frame = OutputAudioRawFrame(
             audio=frame.audio,
@@ -379,6 +388,8 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
 
         # Simulate audio playback with a sleep.
         await self._write_audio_sleep()
+
+        return True
 
     async def _write_frame(self, frame: Frame):
         """Serialize and send a frame to the WebSocket client."""
@@ -410,6 +421,19 @@ class WebsocketServerTransport(BaseTransport):
     Provides a complete WebSocket server implementation with separate input and
     output transports, client connection management, and event handling for
     real-time audio and data streaming applications.
+
+    Event handlers available:
+
+    - on_client_connected(transport, websocket): Client WebSocket connected
+    - on_client_disconnected(transport, websocket): Client WebSocket disconnected
+    - on_session_timeout(transport, websocket): Session timed out
+    - on_websocket_ready(transport): WebSocket server is ready to accept connections
+
+    Example::
+
+        @transport.event_handler("on_client_connected")
+        async def on_client_connected(transport, websocket):
+            ...
     """
 
     def __init__(
@@ -480,6 +504,8 @@ class WebsocketServerTransport(BaseTransport):
         if self._output:
             await self._output.set_client_connection(websocket)
             await self._call_event_handler("on_client_connected", websocket)
+            if self._input:
+                await self._input.push_frame(ClientConnectedFrame())
         else:
             logger.error("A WebsocketServerTransport output is missing in the pipeline")
 

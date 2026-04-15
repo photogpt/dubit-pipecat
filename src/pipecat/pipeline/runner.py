@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -70,11 +70,15 @@ class PipelineRunner(BaseObject):
         """
         logger.debug(f"Runner {self} started running {task}")
         self._tasks[task.name] = task
-        params = PipelineTaskParams(loop=self._loop)
+
+        # PipelineTask handles asyncio.CancelledError to shutdown the pipeline
+        # properly and re-raises it in case there's more cleanup to do.
         try:
+            params = PipelineTaskParams(loop=self._loop)
             await task.run(params)
         except asyncio.CancelledError:
-            await self._cancel()
+            pass
+
         del self._tasks[task.name]
 
         # Cleanup base object.
@@ -86,7 +90,7 @@ class PipelineRunner(BaseObject):
             await self._sig_task
 
         if self._force_gc:
-            self._gc_collect()
+            await self._gc_collect()
 
         logger.debug(f"Runner {self} finished running {task}")
 
@@ -106,13 +110,21 @@ class PipelineRunner(BaseObject):
 
     def _setup_sigint(self):
         """Set up signal handlers for graceful shutdown."""
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, lambda *args: self._sig_handler())
+        try:
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGINT, lambda *args: self._sig_handler())
+        except NotImplementedError:
+            # Windows fallback
+            signal.signal(signal.SIGINT, lambda s, f: self._sig_handler())
 
     def _setup_sigterm(self):
         """Set up signal handlers for graceful shutdown."""
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGTERM, lambda *args: self._sig_handler())
+        try:
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGTERM, lambda *args: self._sig_handler())
+        except NotImplementedError:
+            # Windows fallback
+            signal.signal(signal.SIGTERM, lambda s, f: self._sig_handler())
 
     def _sig_handler(self):
         """Handle interrupt signals by cancelling all tasks."""
@@ -124,8 +136,8 @@ class PipelineRunner(BaseObject):
         logger.warning(f"Interruption detected. Cancelling runner {self}")
         await self.cancel()
 
-    def _gc_collect(self):
+    async def _gc_collect(self):
         """Force garbage collection and log results."""
-        collected = gc.collect()
+        collected = await asyncio.to_thread(gc.collect)
         logger.debug(f"Garbage collector: collected {collected} objects.")
         logger.debug(f"Garbage collector: uncollectable objects {gc.garbage}")

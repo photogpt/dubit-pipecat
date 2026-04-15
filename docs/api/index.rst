@@ -30,7 +30,7 @@ Quick Links
    Runner <api/pipecat.runner>
    Serializers <api/pipecat.serializers>
    Services <api/pipecat.services>
-   Sync <api/pipecat.sync>
    Transcriptions <api/pipecat.transcriptions>
    Transports <api/pipecat.transports>
+   Turns <api/pipecat.turns>
    Utils <api/pipecat.utils>

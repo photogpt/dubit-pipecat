@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -85,7 +85,6 @@ class IdleFrameProcessor(FrameProcessor):
         while True:
             try:
                 await asyncio.wait_for(self._idle_event.wait(), timeout=self._timeout)
+                self._idle_event.clear()
             except asyncio.TimeoutError:
                 await self._callback(self)
-            finally:
-                self._idle_event.clear()

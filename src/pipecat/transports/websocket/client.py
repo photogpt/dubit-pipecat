@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -27,10 +27,11 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InputAudioRawFrame,
+    InputTransportMessageFrame,
     OutputAudioRawFrame,
+    OutputTransportMessageFrame,
+    OutputTransportMessageUrgentFrame,
     StartFrame,
-    TransportMessageFrame,
-    TransportMessageUrgentFrame,
 )
 from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.serializers.base_serializer import FrameSerializer
@@ -50,6 +51,7 @@ class WebsocketClientParams(TransportParams):
     """
 
     add_wav_header: bool = True
+    additional_headers: Optional[dict[str, str]] = None
     serializer: Optional[FrameSerializer] = None
 
 
@@ -130,7 +132,11 @@ class WebsocketClientSession:
             return
 
         try:
-            self._websocket = await websocket_connect(uri=self._uri, open_timeout=10)
+            self._websocket = await websocket_connect(
+                uri=self._uri,
+                open_timeout=10,
+                additional_headers=self._params.additional_headers,
+            )
             self._client_task = self.task_manager.create_task(
                 self._client_task_handler(),
                 f"{self._transport_name}::WebsocketClientSession::_client_task_handler",
@@ -150,17 +156,39 @@ class WebsocketClientSession:
         await self._websocket.close()
         self._websocket = None
 
-    async def send(self, message: websockets.Data):
+    async def send(self, message: websockets.Data) -> bool:
         """Send a message through the WebSocket connection.
 
         Args:
             message: The message data to send.
         """
+        result = False
         try:
             if self._websocket:
                 await self._websocket.send(message)
+                result = True
         except Exception as e:
             logger.error(f"{self} exception sending data: {e.__class__.__name__} ({e})")
+        finally:
+            return result
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if the WebSocket is currently connected.
+
+        Returns:
+            True if the WebSocket is in connected state.
+        """
+        return self._websocket.state == websockets.State.OPEN if self._websocket else False
+
+    @property
+    def is_closing(self) -> bool:
+        """Check if the WebSocket is currently closing.
+
+        Returns:
+            True if the WebSocket is in the process of closing.
+        """
+        return self._websocket.state == websockets.State.CLOSING if self._websocket else False
 
     async def _client_task_handler(self):
         """Handle incoming messages from the WebSocket connection."""
@@ -271,6 +299,8 @@ class WebsocketClientInputTransport(BaseInputTransport):
             return
         if isinstance(frame, InputAudioRawFrame) and self._params.audio_in_enabled:
             await self.push_audio_frame(frame)
+        elif isinstance(frame, InputTransportMessageFrame):
+            await self.broadcast_frame(InputTransportMessageFrame, message=frame.message)
         else:
             await self.push_frame(frame)
 
@@ -363,7 +393,9 @@ class WebsocketClientOutputTransport(BaseOutputTransport):
         await super().cleanup()
         await self._transport.cleanup()
 
-    async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+    async def send_message(
+        self, frame: OutputTransportMessageFrame | OutputTransportMessageUrgentFrame
+    ):
         """Send a transport message through the WebSocket.
 
         Args:
@@ -371,12 +403,18 @@ class WebsocketClientOutputTransport(BaseOutputTransport):
         """
         await self._write_frame(frame)
 
-    async def write_audio_frame(self, frame: OutputAudioRawFrame):
+    async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Write an audio frame to the WebSocket with optional WAV header.
 
         Args:
             frame: The output audio frame to write.
+
+        Returns:
+            True if the audio frame was written successfully, False otherwise.
         """
+        if self._session.is_closing or not self._session.is_connected:
+            return False
+
         frame = OutputAudioRawFrame(
             audio=frame.audio,
             sample_rate=self.sample_rate,
@@ -402,10 +440,16 @@ class WebsocketClientOutputTransport(BaseOutputTransport):
         # Simulate audio playback with a sleep.
         await self._write_audio_sleep()
 
+        return True
+
     async def _write_frame(self, frame: Frame):
         """Write a frame to the WebSocket after serialization."""
+        if self._session.is_closing or not self._session.is_connected:
+            return
+
         if not self._params.serializer:
             return
+
         payload = await self._params.serializer.serialize(frame)
         if payload:
             await self._session.send(payload)
@@ -427,6 +471,17 @@ class WebsocketClientTransport(BaseTransport):
 
     Provides a complete WebSocket client transport implementation with
     input and output capabilities, connection management, and event handling.
+
+    Event handlers available:
+
+    - on_connected(transport): Connected to WebSocket server
+    - on_disconnected(transport): Disconnected from WebSocket server
+
+    Example::
+
+        @transport.event_handler("on_connected")
+        async def on_connected(transport):
+            ...
     """
 
     def __init__(

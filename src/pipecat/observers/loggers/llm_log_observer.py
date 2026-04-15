@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -11,13 +11,12 @@ from loguru import logger
 from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
-    LLMMessagesFrame,
     LLMTextFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContextFrame
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import LLMService
 
@@ -31,8 +30,6 @@ class LLMLogObserver(BaseObserver):
     - LLMFullResponseEndFrame
     - LLMTextFrame
     - FunctionCallInProgressFrame
-    - LLMMessagesFrame
-    - OpenAILLMContextFrame
 
     This allows you to track when the LLM starts responding, what it generates,
     and when it finishes.
@@ -73,16 +70,10 @@ class LLMLogObserver(BaseObserver):
             logger.debug(
                 f"🧠 {src} {arrow} LLM FUNCTION CALL ({frame.tool_call_id}): {frame.function_name!r}({frame.arguments}) at {time_sec:.2f}s"
             )
-        # Log LLMMessagesFrame (input)
-        elif isinstance(frame, LLMMessagesFrame):
-            logger.debug(
-                f"🧠 {arrow} {dst} LLM MESSAGES FRAME: {frame.messages} at {time_sec:.2f}s"
-            )
-        # Log OpenAILLMContextFrame (input)
-        elif isinstance(frame, OpenAILLMContextFrame):
-            logger.debug(
-                f"🧠 {arrow} {dst} LLM CONTEXT FRAME: {frame.context.messages} at {time_sec:.2f}s"
-            )
+        # Log LLMContextFrame (input)
+        elif isinstance(frame, LLMContextFrame):
+            messages = frame.context.get_messages()
+            logger.debug(f"🧠 {arrow} {dst} LLM CONTEXT FRAME: {messages} at {time_sec:.2f}s")
         # Log function call result (input)
         elif isinstance(frame, FunctionCallResultFrame):
             logger.debug(

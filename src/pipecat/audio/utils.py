@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -23,34 +23,6 @@ from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResamp
 # Normal speech usually results in many samples between ±500 to ±5000, depending on loudness and mic gain.
 # So we are using a threshold that is well below what real speech produces.
 SPEAKING_THRESHOLD = 20
-
-
-def create_default_resampler(**kwargs) -> BaseAudioResampler:
-    """Create a default audio resampler instance.
-
-    .. deprecated:: 0.0.74
-        This function is deprecated and will be removed in a future version.
-        Use `create_stream_resampler` for real-time processing scenarios or
-        `create_file_resampler` for batch processing of complete audio files.
-
-    Args:
-        **kwargs: Additional keyword arguments passed to the resampler constructor.
-
-    Returns:
-        A configured SOXRAudioResampler instance.
-    """
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("always")
-        warnings.warn(
-            "`create_default_resampler` is deprecated. "
-            "Use `create_stream_resampler` for real-time processing scenarios or "
-            "`create_file_resampler` for batch processing of complete audio files.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-    return SOXRAudioResampler(**kwargs)
 
 
 def create_file_resampler(**kwargs) -> BaseAudioResampler:

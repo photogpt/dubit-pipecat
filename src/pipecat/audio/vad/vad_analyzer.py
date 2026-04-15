@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -11,7 +11,9 @@ data structures for voice activity detection in audio streams. Includes state
 management, parameter configuration, and audio analysis framework.
 """
 
+import asyncio
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Optional
 
@@ -22,7 +24,7 @@ from pipecat.audio.utils import calculate_audio_volume, exp_smoothing
 
 VAD_CONFIDENCE = 0.7
 VAD_START_SECS = 0.2
-VAD_STOP_SECS = 0.8
+VAD_STOP_SECS = 0.2
 VAD_MIN_VOLUME = 0.6
 
 
@@ -84,6 +86,10 @@ class VADAnalyzer(ABC):
         self._smoothing_factor = 0.2
         self._prev_volume = 0
 
+        # Thread executor that will run the model. We only need one thread per
+        # analyzer because one analyzer just handles one audio stream.
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
     @property
     def sample_rate(self) -> int:
         """Get the current sample rate.
@@ -121,7 +127,7 @@ class VADAnalyzer(ABC):
         pass
 
     @abstractmethod
-    def voice_confidence(self, buffer) -> float:
+    def voice_confidence(self, buffer: bytes) -> float:
         """Calculate voice activity confidence for the given audio buffer.
 
         Args:
@@ -165,7 +171,7 @@ class VADAnalyzer(ABC):
         volume = calculate_audio_volume(audio, self.sample_rate)
         return exp_smoothing(volume, self._prev_volume, self._smoothing_factor)
 
-    def analyze_audio(self, buffer) -> VADState:
+    async def analyze_audio(self, buffer: bytes) -> VADState:
         """Analyze audio buffer and return current VAD state.
 
         Processes incoming audio data, maintains internal state, and determines
@@ -177,6 +183,12 @@ class VADAnalyzer(ABC):
         Returns:
             Current VAD state after processing the buffer.
         """
+        loop = asyncio.get_running_loop()
+        state = await loop.run_in_executor(self._executor, self._run_analyzer, buffer)
+        return state
+
+    def _run_analyzer(self, buffer: bytes) -> VADState:
+        """Analyze audio buffer and return current VAD state."""
         self._vad_buffer += buffer
 
         num_required_bytes = self._vad_frames_num_bytes
@@ -230,3 +242,12 @@ class VADAnalyzer(ABC):
             self._vad_stopping_count = 0
 
         return self._vad_state
+
+    async def cleanup(self):
+        """Clean up resources.
+
+        This method should be called when the object is no longer needed.
+        It waits for all currently executing event handler tasks to finish
+        before returning.
+        """
+        pass

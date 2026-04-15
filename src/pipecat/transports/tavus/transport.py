@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -21,15 +21,17 @@ from loguru import logger
 from pydantic import BaseModel
 
 from pipecat.frames.frames import (
+    BotConnectedFrame,
     CancelFrame,
+    ClientConnectedFrame,
     EndFrame,
     Frame,
     InputAudioRawFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
+    OutputTransportMessageFrame,
+    OutputTransportMessageUrgentFrame,
     StartFrame,
-    TransportMessageFrame,
-    TransportMessageUrgentFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
 from pipecat.transports.base_input import BaseInputTransport
@@ -132,10 +134,12 @@ class TavusCallbacks(BaseModel):
     """Callback handlers for Tavus events.
 
     Parameters:
+        on_joined: Called when the bot joins the Daily room.
         on_participant_joined: Called when a participant joins the conversation.
         on_participant_left: Called when a participant leaves the conversation.
     """
 
+    on_joined: Callable[[Mapping[str, Any]], Awaitable[None]]
     on_participant_joined: Callable[[Mapping[str, Any]], Awaitable[None]]
     on_participant_left: Callable[[Mapping[str, Any], str], Awaitable[None]]
 
@@ -221,6 +225,7 @@ class TavusTransportClient:
                 ),
                 on_joined=self._on_joined,
                 on_left=self._on_left,
+                on_before_leave=partial(self._on_handle_callback, "on_before_leave"),
                 on_error=partial(self._on_handle_callback, "on_error"),
                 on_app_message=partial(self._on_handle_callback, "on_app_message"),
                 on_call_state_updated=partial(self._on_handle_callback, "on_call_state_updated"),
@@ -236,6 +241,7 @@ class TavusTransportClient:
                 on_dialout_stopped=partial(self._on_handle_callback, "on_dialout_stopped"),
                 on_dialout_error=partial(self._on_handle_callback, "on_dialout_error"),
                 on_dialout_warning=partial(self._on_handle_callback, "on_dialout_warning"),
+                on_dtmf_event=partial(self._on_handle_callback, "on_dtmf_event"),
                 on_participant_joined=self._callbacks.on_participant_joined,
                 on_participant_left=self._callbacks.on_participant_left,
                 on_participant_updated=partial(self._on_handle_callback, "on_participant_updated"),
@@ -264,11 +270,12 @@ class TavusTransportClient:
         try:
             await self._client.cleanup()
         except Exception as e:
-            logger.exception(f"Exception during cleanup: {e}")
+            logger.error(f"Exception during cleanup: {e}")
 
     async def _on_joined(self, data):
         """Handle joined event."""
         logger.debug("TavusTransportClient joined!")
+        await self._callbacks.on_joined(data)
 
     async def _on_left(self):
         """Handle left event."""
@@ -344,7 +351,9 @@ class TavusTransportClient:
             participant_id, callback, audio_source, sample_rate, callback_interval_ms
         )
 
-    async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+    async def send_message(
+        self, frame: OutputTransportMessageFrame | OutputTransportMessageUrgentFrame
+    ):
         """Send a message to participants.
 
         Args:
@@ -372,7 +381,7 @@ class TavusTransportClient:
 
     async def send_interrupt_message(self) -> None:
         """Send an interrupt message to the conversation."""
-        transport_frame = TransportMessageUrgentFrame(
+        transport_frame = OutputTransportMessageUrgentFrame(
             message={
                 "message_type": "conversation",
                 "event_type": "conversation.interrupt",
@@ -395,26 +404,33 @@ class TavusTransportClient:
             participant_settings=participant_settings, profile_settings=profile_settings
         )
 
-    async def write_audio_frame(self, frame: OutputAudioRawFrame):
+    async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Write an audio frame to the transport.
 
         Args:
             frame: The audio frame to write.
+
+        Returns:
+            True if the audio frame was written successfully, False otherwise.
         """
         if not self._client:
-            return
-        await self._client.write_audio_frame(frame)
+            return False
+        return await self._client.write_audio_frame(frame)
 
-    async def register_audio_destination(self, destination: str):
+    async def register_audio_destination(
+        self, destination: str, auto_silence: Optional[bool] = True
+    ):
         """Register an audio destination for output.
 
         Args:
             destination: The destination identifier to register.
+            auto_silence: If True, the audio source inserts silence when no audio is available.
+                If False, the source waits for audio data. Defaults to True.
         """
         if not self._client:
             return
 
-        await self._client.register_audio_destination(destination)
+        await self._client.register_audio_destination(destination, auto_silence=auto_silence)
 
 
 class TavusInputTransport(BaseInputTransport):
@@ -513,7 +529,7 @@ class TavusInputTransport(BaseInputTransport):
         """Handle received participant audio data."""
         frame = InputAudioRawFrame(
             audio=audio.audio_frames,
-            sample_rate=audio.audio_frames,
+            sample_rate=audio.sample_rate,
             num_channels=audio.num_channels,
         )
         frame.transport_source = audio_source
@@ -601,7 +617,9 @@ class TavusOutputTransport(BaseOutputTransport):
         await super().cancel(frame)
         await self._client.stop()
 
-    async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+    async def send_message(
+        self, frame: OutputTransportMessageFrame | OutputTransportMessageUrgentFrame
+    ):
         """Send a message to participants.
 
         Args:
@@ -625,15 +643,18 @@ class TavusOutputTransport(BaseOutputTransport):
         """Handle interruption events by sending interrupt message."""
         await self._client.send_interrupt_message()
 
-    async def write_audio_frame(self, frame: OutputAudioRawFrame):
+    async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Write an audio frame to the Tavus transport.
 
         Args:
             frame: The audio frame to write.
+
+        Returns:
+            True if the audio frame was written successfully, False otherwise.
         """
         # This is the custom track destination expected by Tavus
         frame.transport_destination = self._transport_destination
-        await self._client.write_audio_frame(frame)
+        return await self._client.write_audio_frame(frame)
 
     async def register_audio_destination(self, destination: str):
         """Register an audio destination.
@@ -650,6 +671,18 @@ class TavusTransport(BaseTransport):
     When used, the Pipecat bot joins the same virtual room as the Tavus Avatar and the user.
     This is achieved by using `TavusTransportClient`, which initiates the conversation via
     `TavusApi` and obtains a room URL that all participants connect to.
+
+    Event handlers available:
+
+    - on_connected(transport, data): Bot connected to the room
+    - on_client_connected(transport, participant): Participant connected to the session
+    - on_client_disconnected(transport, participant): Participant disconnected from the session
+
+    Example::
+
+        @transport.event_handler("on_client_connected")
+        async def on_client_connected(transport, participant):
+            ...
     """
 
     def __init__(
@@ -680,6 +713,7 @@ class TavusTransport(BaseTransport):
         self._params = params
 
         callbacks = TavusCallbacks(
+            on_joined=self._on_joined,
             on_participant_joined=self._on_participant_joined,
             on_participant_left=self._on_participant_left,
         )
@@ -698,8 +732,15 @@ class TavusTransport(BaseTransport):
 
         # Register supported handlers. The user will only be able to register
         # these handlers.
+        self._register_event_handler("on_connected")
         self._register_event_handler("on_client_connected")
         self._register_event_handler("on_client_disconnected")
+
+    async def _on_joined(self, data):
+        """Handle bot joined room event."""
+        await self._call_event_handler("on_connected", data)
+        if self._input:
+            await self._input.push_frame(BotConnectedFrame())
 
     async def _on_participant_left(self, participant, reason):
         """Handle participant left events."""
@@ -764,6 +805,8 @@ class TavusTransport(BaseTransport):
     async def _on_client_connected(self, participant: Any):
         """Handle client connected events."""
         await self._call_event_handler("on_client_connected", participant)
+        if self._input:
+            await self._input.push_frame(ClientConnectedFrame())
 
     async def _on_client_disconnected(self, participant: Any):
         """Handle client disconnected events."""

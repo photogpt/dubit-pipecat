@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -18,16 +18,28 @@ Dependencies:
 """
 
 import re
-from typing import FrozenSet, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import FrozenSet, List, Optional, Sequence, Tuple
 
 import nltk
+from loguru import logger
 from nltk.tokenize import sent_tokenize
 
 # Ensure punkt_tab tokenizer data is available
 try:
     nltk.data.find("tokenizers/punkt_tab")
 except LookupError:
-    nltk.download("punkt_tab", quiet=True)
+    try:
+        nltk.download("punkt_tab", quiet=True)
+    except (OSError, PermissionError) as e:
+        logger.error(
+            f"Failed to download NLTK 'punkt_tab' tokenizer data: {e}. "
+            "This data is required for sentence tokenization features. "
+            "The download failed due to filesystem permissions. "
+            "To resolve: pre-install the data in a location with appropriate read permissions, "
+            "or set the NLTK_DATA environment variable to point to a writable directory. "
+            "See https://www.nltk.org/data.html for more information."
+        )
 
 SENTENCE_ENDING_PUNCTUATION: FrozenSet[str] = frozenset(
     {
@@ -36,6 +48,7 @@ SENTENCE_ENDING_PUNCTUATION: FrozenSet[str] = frozenset(
         "!",
         "?",
         ";",
+        "…",
         # East Asian punctuation (Chinese (Traditional & Simplified), Japanese, Korean)
         "。",  # Ideographic full stop
         "？",  # Full-width question mark
@@ -74,6 +87,17 @@ SENTENCE_ENDING_PUNCTUATION: FrozenSet[str] = frozenset(
         "፧",  # Ethiopic question mark
         "፨",  # Ethiopic paragraph separator
     }
+)
+
+# Latin punctuation that NLTK handles well — these need NLTK's disambiguation
+# because "." can appear in abbreviations, decimals, etc.
+_LATIN_SENTENCE_ENDING_PUNCTUATION: FrozenSet[str] = frozenset({".", "!", "?", ";", "…"})
+
+# Non-Latin sentence-ending punctuation that is always unambiguous and never needs
+# NLTK's disambiguation logic. Used as a fallback when NLTK doesn't support the
+# language (e.g., Japanese, Chinese, Korean, Hindi, Arabic).
+UNAMBIGUOUS_SENTENCE_ENDING_PUNCTUATION: FrozenSet[str] = (
+    SENTENCE_ENDING_PUNCTUATION - _LATIN_SENTENCE_ENDING_PUNCTUATION
 )
 
 StartEndTags = Tuple[str, str]
@@ -132,7 +156,17 @@ def match_endofsentence(text: str) -> int:
     # common for text to be single words, so we need to ensure
     # sentence-ending punctuation is present.
     if len(sentences) == 1 and first_sentence == text:
-        return len(text) if text and text[-1] in SENTENCE_ENDING_PUNCTUATION else 0
+        if text and text[-1] in SENTENCE_ENDING_PUNCTUATION:
+            return len(text)
+        # Fallback for languages not supported by NLTK (e.g., Japanese, Chinese,
+        # Korean, Hindi, Arabic). NLTK returned the entire text as a single
+        # sentence, and the last character is not sentence-ending punctuation
+        # (it's a lookahead character). Scan for unambiguous non-Latin sentence-
+        # ending punctuation that doesn't need NLTK's disambiguation.
+        for i, ch in enumerate(text):
+            if ch in UNAMBIGUOUS_SENTENCE_ENDING_PUNCTUATION:
+                return i + 1
+        return 0
 
     # If there are multiple sentences, the first one is complete by definition
     # (NLTK found a boundary, so there must be proper punctuation)
@@ -201,3 +235,86 @@ def parse_start_end_tags(
             return (None, len(text))
 
     return (None, current_tag_index)
+
+
+@dataclass
+class TextPartForConcatenation:
+    """Class representing a part of text for concatenation with concatenate_aggregated_text.
+
+    Parameters:
+        text: The text content.
+        includes_inter_part_spaces: Whether any necessary inter-frame
+            (leading/trailing) spaces are already included in the text.
+    """
+
+    text: str
+    includes_inter_part_spaces: bool
+
+    def __str__(self):
+        return f"{self.name}(text: [{self.text}], includes_inter_part_spaces: {self.includes_inter_part_spaces})"
+
+
+def concatenate_aggregated_text(text_parts: List[TextPartForConcatenation]) -> str:
+    """Concatenate a list of text parts into a single string.
+
+    This function joins the provided list of text parts into a single string,
+    taking into account whether or not the parts already contain spacing.
+
+    This function is useful for aggregating text segments received from LLMs or
+    transcription services.
+
+    Args:
+        text_parts: A list of text parts to concatenate.
+
+    Returns:
+        A single concatenated string.
+    """
+    result = ""
+    last_includes_inter_part_spaces = False
+
+    if not text_parts:
+        return result
+
+    def append_part(part: TextPartForConcatenation):
+        nonlocal result
+        nonlocal last_includes_inter_part_spaces
+        result += part.text
+        last_includes_inter_part_spaces = part.includes_inter_part_spaces
+
+    for part in text_parts:
+        # Part is empty.
+        # Skip.
+        if not part.text:
+            continue
+
+        # Result is as yet empty.
+        # Just append.
+        if not result:
+            append_part(part)
+            continue
+
+        if part.includes_inter_part_spaces and last_includes_inter_part_spaces:
+            # This part is part of an ongoing run that has spaces already included.
+            # Just append.
+            append_part(part)
+        elif not part.includes_inter_part_spaces and not last_includes_inter_part_spaces:
+            # This part is part of an ongoing run that has no spaces included.
+            # Add a space before appending.
+            result += " "
+            append_part(part)
+        else:
+            # This part represents a transition to a new run (spaces -> no spaces, or vice versa).
+            # Add a space if needed, before appending.
+            if not result[-1].isspace() and not part.text[0].isspace():
+                result += " "
+            append_part(part)
+
+    # NOTE: the above logic assumes that runs of text parts with
+    # includes_inter_part_spaces=True are well-formed, i.e. they're not
+    # actually multiple separate runs with a space-less boundary, like
+    # "hello ", "world.", "goodnight ", "moon."
+
+    # Clean up any excessive whitespace
+    result = result.strip()
+
+    return result

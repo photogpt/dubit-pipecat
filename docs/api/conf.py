@@ -4,6 +4,19 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Fix Pydantic v2 + Sphinx autodoc incompatibility: ConfigDict(extra="allow") fails
+# during Sphinx's import because __pydantic_extra__ annotation on BaseModel resolves to
+# `Dict[str, Any] | None` whose get_origin() is Union, not dict. Patch the check to
+# accept Union-wrapped dict types (i.e., Optional[Dict[str, Any]]).
+import pydantic._internal._generate_schema as _pydantic_gs
+
+_ORIG_DICT_TYPES = _pydantic_gs.DICT_TYPES
+# Expand the accepted types to include Union (Optional[Dict[str, Any]])
+import types
+import typing
+
+_pydantic_gs.DICT_TYPES = [*_ORIG_DICT_TYPES, typing.Union, types.UnionType]
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("sphinx-build")
@@ -48,8 +61,7 @@ autodoc_default_options = {
 # Mock imports for optional dependencies
 autodoc_mock_imports = [
     # Krisp - has build issues on some platforms
-    "pipecat_ai_krisp",
-    "krisp",
+    "krisp_audio",
     # System-specific GUI libraries
     "_tkinter",
     "tkinter",
@@ -60,9 +72,6 @@ autodoc_mock_imports = [
     # OpenCV - sometimes has import issues during docs build
     "cv2",
     # Heavy ML packages excluded from ReadTheDocs
-    # ultravox dependencies
-    "vllm",
-    "vllm.engine.arg_utils",
     # local-smart-turn dependencies
     "coremltools",
     "coremltools.models",
@@ -80,19 +89,29 @@ autodoc_mock_imports = [
     "einops",
     "intel_extension_for_pytorch",
     "huggingface_hub",
-    # riva dependencies
-    "riva",
-    "riva.client",
-    "riva.client.Auth",
-    "riva.client.ASRService",
-    "riva.client.StreamingRecognitionConfig",
-    "riva.client.RecognitionConfig",
-    "riva.client.AudioEncoding",
-    "riva.client.proto.riva_tts_pb2",
-    "riva.client.SpeechSynthesisService",
     # MLX dependencies (Apple Silicon specific)
     "mlx",
     "mlx_whisper",  # Note: might need underscore format too
+    # Pydantic v2 compatibility issues in third-party SDKs
+    "hume",
+    "hume.tts",
+    "hume.tts.types",
+    "cartesia",
+    "camb",
+    "sarvamai",
+    "openai.types.beta.realtime",
+    "langchain_core",
+    "langchain_core.messages",
+    # FastAPI - Pydantic v2 compatibility issues during Sphinx autodoc
+    "fastapi",
+    "fastapi.applications",
+    "fastapi.routing",
+    "fastapi.params",
+    "fastapi.middleware",
+    "fastapi.responses",
+    "uvicorn",
+    # Deepgram dependencies
+    "deepgram",
 ]
 
 # HTML output settings
@@ -118,8 +137,9 @@ def import_core_modules():
         "pipecat.observers",
         "pipecat.runner",
         "pipecat.serializers",
-        "pipecat.sync",
         "pipecat.transcriptions",
+        "pipecat.turns",
+        "pipecat.extensions",
         "pipecat.utils",
     ]
 
@@ -164,7 +184,6 @@ def setup(app):
     logger.info(f"Source directory: {source_dir}")
 
     excludes = [
-        str(project_root / "src/pipecat/pipeline/to_be_updated"),
         str(project_root / "src/pipecat/examples"),
         str(project_root / "src/pipecat/tests"),
         "**/test_*.py",

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -9,8 +9,6 @@
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
-
-from pipecat.transcriptions.language import Language
 
 
 class LanguageConfig(BaseModel):
@@ -152,6 +150,10 @@ class MessagesConfig(BaseModel):
 class GladiaInputParams(BaseModel):
     """Configuration parameters for the Gladia STT service.
 
+    .. deprecated:: 0.0.105
+        Use ``settings=GladiaSTTService.Settings(...)`` for runtime-updatable
+        fields and direct init parameters for encoding/bit_depth/channels.
+
     Parameters:
         encoding: Audio encoding format
         bit_depth: Audio bit depth
@@ -159,16 +161,13 @@ class GladiaInputParams(BaseModel):
         custom_metadata: Additional metadata to include with requests
         endpointing: Silence duration in seconds to mark end of speech
         maximum_duration_without_endpointing: Maximum utterance duration without silence
-        language: Language code for transcription
-
-            .. deprecated:: 0.0.62
-                The 'language' parameter is deprecated and will be removed in a future version.
-                Use 'language_config' instead.
-
         language_config: Detailed language configuration
         pre_processing: Audio pre-processing options
         realtime_processing: Real-time processing features
         messages_config: WebSocket message filtering options
+        enable_vad: Enable VAD to trigger end of utterance detection. This should be used
+            without any other VAD enabled in the agent and will emit the speaker started
+            and stopped frames. Defaults to False.
     """
 
     encoding: Optional[str] = "wav/pcm"
@@ -177,8 +176,8 @@ class GladiaInputParams(BaseModel):
     custom_metadata: Optional[Dict[str, Any]] = None
     endpointing: Optional[float] = None
     maximum_duration_without_endpointing: Optional[int] = 5
-    language: Optional[Language] = None  # Deprecated
     language_config: Optional[LanguageConfig] = None
     pre_processing: Optional[PreProcessingConfig] = None
     realtime_processing: Optional[RealtimeProcessingConfig] = None
     messages_config: Optional[MessagesConfig] = None
+    enable_vad: bool = False

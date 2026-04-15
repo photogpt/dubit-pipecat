@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -10,10 +10,10 @@ This module provides a WebSocket-based STT service that integrates with
 the Cartesia Live transcription API for real-time speech recognition.
 """
 
-import asyncio
 import json
 import urllib.parse
-from typing import AsyncGenerator, Optional
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Optional
 
 from loguru import logger
 
@@ -24,17 +24,18 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.stt_service import STTService
+from pipecat.services.settings import STTSettings
+from pipecat.services.stt_latency import CARTESIA_TTFS_P99
+from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_stt
 
 try:
-    import websockets
     from websockets.asyncio.client import connect as websocket_connect
     from websockets.protocol import State
 except ModuleNotFoundError as e:
@@ -43,11 +44,19 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
+@dataclass
+class CartesiaSTTSettings(STTSettings):
+    """Settings for CartesiaSTTService."""
+
+    pass
+
+
 class CartesiaLiveOptions:
     """Configuration options for Cartesia Live STT service.
 
-    Manages transcription parameters including model selection, language,
-    audio encoding format, and sample rate settings.
+    .. deprecated:: 0.0.105
+        Use ``settings=CartesiaSTTService.Settings(...)`` for model/language and
+        direct ``__init__`` parameters for encoding/sample_rate instead.
     """
 
     def __init__(
@@ -124,21 +133,32 @@ class CartesiaLiveOptions:
         return cls(**json.loads(json_str))
 
 
-class CartesiaSTTService(STTService):
+class CartesiaSTTService(WebsocketSTTService):
     """Speech-to-text service using Cartesia Live API.
 
     Provides real-time speech transcription through WebSocket connection
     to Cartesia's Live transcription service. Supports both interim and
     final transcriptions with configurable models and languages.
+
+    Cartesia disconnects WebSocket connections after 3 minutes of inactivity.
+    The timeout resets with each message (audio data or text command) sent to
+    the server. Silence-based keepalive is enabled by default to prevent this.
+    See: https://docs.cartesia.ai/api-reference/stt/stt
     """
+
+    Settings = CartesiaSTTSettings
+    _settings: Settings
 
     def __init__(
         self,
         *,
         api_key: str,
         base_url: str = "",
-        sample_rate: int = 16000,
+        encoding: str = "pcm_s16le",
+        sample_rate: Optional[int] = None,
         live_options: Optional[CartesiaLiveOptions] = None,
+        settings: Optional[Settings] = None,
+        ttfs_p99_latency: Optional[float] = CARTESIA_TTFS_P99,
         **kwargs,
     ):
         """Initialize CartesiaSTTService with API key and options.
@@ -146,38 +166,60 @@ class CartesiaSTTService(STTService):
         Args:
             api_key: Authentication key for Cartesia API.
             base_url: Custom API endpoint URL. If empty, uses default.
-            sample_rate: Audio sample rate in Hz. Defaults to 16000.
+            encoding: Audio encoding format. Defaults to "pcm_s16le".
+            sample_rate: Audio sample rate in Hz. If None, uses the pipeline
+                sample rate.
             live_options: Configuration options for transcription service.
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=CartesiaSTTService.Settings(...)`` for model/language
+                    and direct init parameters for encoding/sample_rate instead.
+
+            settings: Runtime-updatable settings. When provided alongside deprecated
+                parameters, ``settings`` values take precedence.
+            ttfs_p99_latency: P99 latency from speech end to final transcript in seconds.
+                Override for your deployment. See https://github.com/pipecat-ai/stt-benchmark
             **kwargs: Additional arguments passed to parent STTService.
         """
-        sample_rate = sample_rate or (live_options.sample_rate if live_options else None)
-        super().__init__(sample_rate=sample_rate, **kwargs)
-
-        default_options = CartesiaLiveOptions(
+        # 1. Initialize default_settings with hardcoded defaults
+        default_settings = self.Settings(
             model="ink-whisper",
             language=Language.EN.value,
-            encoding="pcm_s16le",
-            sample_rate=sample_rate,
         )
 
-        merged_options = default_options
-        if live_options:
-            merged_options_dict = default_options.to_dict()
-            merged_options_dict.update(live_options.to_dict())
-            merged_options = CartesiaLiveOptions(
-                **{
-                    k: v
-                    for k, v in merged_options_dict.items()
-                    if not isinstance(v, str) or v != "None"
-                }
-            )
+        # 2. Apply live_options overrides — only if settings not provided
+        if live_options is not None:
+            self._warn_init_param_moved_to_settings("live_options")
+            if not settings:
+                if live_options.sample_rate and sample_rate is None:
+                    sample_rate = live_options.sample_rate
+                if live_options.encoding:
+                    encoding = live_options.encoding
+                if live_options.model:
+                    default_settings.model = live_options.model
+                if live_options.language:
+                    lang = live_options.language
+                    default_settings.language = lang.value if isinstance(lang, Language) else lang
 
-        self._settings = merged_options
-        self.set_model_name(merged_options.model)
+        # 3. Apply settings delta (canonical API, always wins)
+        if settings is not None:
+            default_settings.apply_update(settings)
+
+        super().__init__(
+            sample_rate=sample_rate,
+            ttfs_p99_latency=ttfs_p99_latency,
+            keepalive_timeout=120,
+            keepalive_interval=30,
+            settings=default_settings,
+            **kwargs,
+        )
+
         self._api_key = api_key
         self._base_url = base_url or "api.cartesia.ai"
-        self._connection = None
-        self._receiver_task = None
+        self._receive_task = None
+
+        # Init-only audio config (not runtime-updatable).
+        self._encoding = encoding
 
     def can_generate_metrics(self) -> bool:
         """Check if the service can generate processing metrics.
@@ -214,6 +256,26 @@ class CartesiaSTTService(STTService):
         await super().cancel(frame)
         await self._disconnect()
 
+    async def _start_metrics(self):
+        """Start performance metrics collection for transcription processing."""
+        await self.start_processing_metrics()
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process incoming frames and handle speech events.
+
+        Args:
+            frame: The frame to process.
+            direction: Direction of frame flow in the pipeline.
+        """
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            await self._start_metrics()
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            # Send finalize command to flush the transcription session
+            if self._websocket and self._websocket.state is State.OPEN:
+                await self._websocket.send("finalize")
+
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         """Process audio data for speech-to-text transcription.
 
@@ -223,46 +285,100 @@ class CartesiaSTTService(STTService):
         Yields:
             None - transcription results are handled via WebSocket responses.
         """
-        # If the connection is closed, due to timeout, we need to reconnect when the user starts speaking again
-        if not self._connection or self._connection.state is State.CLOSED:
+        # If the connection is not open (closed or closing), reconnect
+        if not self._websocket or self._websocket.state is not State.OPEN:
             await self._connect()
 
-        await self._connection.send(audio)
+        await self._websocket.send(audio)
         yield None
 
     async def _connect(self):
-        params = self._settings.to_dict()
-        ws_url = f"wss://{self._base_url}/stt/websocket?{urllib.parse.urlencode(params)}"
-        logger.debug(f"Connecting to Cartesia: {ws_url}")
-        headers = {"Cartesia-Version": "2025-04-16", "X-API-Key": self._api_key}
+        await self._connect_websocket()
 
+        await super()._connect()
+
+        if self._websocket and not self._receive_task:
+            self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
+
+    async def _disconnect(self):
+        await super()._disconnect()
+
+        if self._receive_task:
+            await self.cancel_task(self._receive_task)
+            self._receive_task = None
+
+        await self._disconnect_websocket()
+
+    async def _update_settings(self, delta: STTSettings) -> dict[str, Any]:
+        """Apply a settings delta.
+
+        Args:
+            delta: A :class:`STTSettings` (or ``CartesiaSTTService.Settings``) delta.
+
+        Returns:
+            Dict mapping changed field names to their previous values.
+        """
+        changed = await super()._update_settings(delta)
+
+        if not changed:
+            return changed
+
+        if self._websocket:
+            await self._disconnect()
+            await self._connect()
+
+        return changed
+
+    async def _connect_websocket(self):
         try:
-            self._connection = await websocket_connect(ws_url, additional_headers=headers)
-            # Setup the receiver task to handle the incoming messages from the Cartesia server
-            if self._receiver_task is None or self._receiver_task.done():
-                self._receiver_task = asyncio.create_task(self._receive_messages())
-            logger.debug(f"Connected to Cartesia")
+            if self._websocket and self._websocket.state is State.OPEN:
+                return
+            logger.debug("Connecting to Cartesia STT")
+
+            params = {
+                "model": self._settings.model,
+                "language": self._settings.language,
+                "encoding": self._encoding,
+                "sample_rate": str(self.sample_rate),
+            }
+            ws_url = f"wss://{self._base_url}/stt/websocket?{urllib.parse.urlencode(params)}"
+            headers = {"Cartesia-Version": "2025-04-16", "X-API-Key": self._api_key}
+
+            self._websocket = await websocket_connect(ws_url, additional_headers=headers)
+            await self._call_event_handler("on_connected")
         except Exception as e:
-            logger.error(f"{self}: unable to connect to Cartesia: {e}")
+            await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
+
+    async def _disconnect_websocket(self):
+        ws = self._websocket
+        try:
+            if ws and ws.state is State.OPEN:
+                logger.debug("Disconnecting from Cartesia STT")
+                await ws.send("done")
+                await ws.close()
+        except Exception as e:
+            await self.push_error(error_msg=f"Error closing websocket: {e}", exception=e)
+        finally:
+            # Only clear if no concurrent _connect has already replaced it.
+            if self._websocket is ws:
+                self._websocket = None
+            await self._call_event_handler("on_disconnected")
+
+    def _get_websocket(self):
+        if self._websocket:
+            return self._websocket
+        raise Exception("Websocket not connected")
 
     async def _receive_messages(self):
-        try:
-            while True:
-                if not self._connection or self._connection.state is State.CLOSED:
-                    break
-
-                message = await self._connection.recv()
-                try:
-                    data = json.loads(message)
-                    await self._process_response(data)
-                except json.JSONDecodeError:
-                    logger.warning(f"Received non-JSON message: {message}")
-        except asyncio.CancelledError:
-            pass
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.debug(f"WebSocket connection closed: {e}")
-        except Exception as e:
-            logger.error(f"Error in message receiver: {e}")
+        """Process incoming WebSocket messages."""
+        async for message in self._get_websocket():
+            try:
+                data = json.loads(message)
+                await self._process_response(data)
+            except json.JSONDecodeError:
+                logger.warning(f"Received non-JSON message: {message}")
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
 
     async def _process_response(self, data):
         if "type" in data:
@@ -270,7 +386,8 @@ class CartesiaSTTService(STTService):
                 await self._on_transcript(data)
 
             elif data["type"] == "error":
-                logger.error(f"Cartesia error: {data.get('message', 'Unknown error')}")
+                error_msg = data.get("message", "Unknown error")
+                await self.push_error(error_msg=error_msg)
 
     @traced_stt
     async def _handle_transcription(
@@ -294,7 +411,6 @@ class CartesiaSTTService(STTService):
                 pass
 
         if len(transcript) > 0:
-            await self.stop_ttfb_metrics()
             if is_final:
                 await self.push_frame(
                     TranscriptionFrame(
@@ -302,6 +418,7 @@ class CartesiaSTTService(STTService):
                         self._user_id,
                         time_now_iso8601(),
                         language,
+                        result=data,
                     )
                 )
                 await self._handle_transcription(transcript, is_final, language)
@@ -314,43 +431,6 @@ class CartesiaSTTService(STTService):
                         self._user_id,
                         time_now_iso8601(),
                         language,
+                        result=data,
                     )
                 )
-
-    async def _disconnect(self):
-        if self._receiver_task:
-            self._receiver_task.cancel()
-            try:
-                await self._receiver_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.exception(f"Unexpected exception while cancelling task: {e}")
-            self._receiver_task = None
-
-        if self._connection and self._connection.state is State.OPEN:
-            logger.debug("Disconnecting from Cartesia")
-
-            await self._connection.close()
-            self._connection = None
-
-    async def start_metrics(self):
-        """Start performance metrics collection for transcription processing."""
-        await self.start_ttfb_metrics()
-        await self.start_processing_metrics()
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        """Process incoming frames and handle speech events.
-
-        Args:
-            frame: The frame to process.
-            direction: Direction of frame flow in the pipeline.
-        """
-        await super().process_frame(frame, direction)
-
-        if isinstance(frame, UserStartedSpeakingFrame):
-            await self.start_metrics()
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            # Send finalize command to flush the transcription session
-            if self._connection and self._connection.state is State.OPEN:
-                await self._connection.send("finalize")

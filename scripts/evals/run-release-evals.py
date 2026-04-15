@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024-2025 Daily
+# Copyright (c) 2024–2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from eval import EvalRunner
+from eval import EvalConfig, EvalRunner
 from loguru import logger
 from PIL import Image
 from utils import check_env_variables
@@ -22,213 +22,244 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 ASSETS_DIR = SCRIPT_DIR / "assets"
 
-FOUNDATIONAL_DIR = SCRIPT_DIR.parent.parent / "examples" / "foundational"
+FOUNDATIONAL_DIR = SCRIPT_DIR.parent.parent / "examples"
 
-# Speaking order constants
-USER_SPEAKS_FIRST = True
-BOT_SPEAKS_FIRST = False
-
-# Math
-PROMPT_SIMPLE_MATH = "A simple math addition."
-EVAL_SIMPLE_MATH = "Correct math addition."
-
-# Weather
-PROMPT_WEATHER = "What's the weather in San Francisco?"
-EVAL_WEATHER = (
-    "Something specific about the current weather in San Francisco, including the degrees."
+EVAL_SIMPLE_MATH = EvalConfig(
+    prompt="A simple math addition.",
+    eval="The user answers the math addition correctly.",
 )
 
-# Online search
-PROMPT_ONLINE_SEARCH = "What's the date right now in London?"
-EVAL_ONLINE_SEARCH = f"Today is {datetime.now(timezone.utc).strftime('%B %d, %Y')}."
+EVAL_WEATHER = EvalConfig(
+    prompt="What's the weather in San Francisco? Temperature should be in Fahrenheit.",
+    eval="The user talks about the weather in San Francisco, including the degrees.",
+)
 
-# Switch language
-PROMPT_SWITCH_LANGUAGE = "Say something in Spanish."
-EVAL_SWITCH_LANGUAGE = "The user is now talking in Spanish."
+EVAL_WEATHER_AND_RESTAURANT = EvalConfig(
+    prompt="What's the weather in San Francisco, and what's a good restaurant there? Temperature should be in Fahrenheit.",
+    eval="The user talks about the weather in San Francisco, including the degrees, and provides a restaurant recommendation.",
+)
 
-# Vision
-PROMPT_VISION = ("What do you see?", Image.open(ASSETS_DIR / "cat.jpg"))
-EVAL_VISION = "A cat description."
+EVAL_ONLINE_SEARCH = EvalConfig(
+    prompt="What's the current date in UTC?",
+    eval=f"Current date in UTC is {datetime.now(timezone.utc).strftime('%A, %B %d, %Y')}.",
+)
 
-# Voicemail
-PROMPT_VOICEMAIL = "Please leave a message after the beep."
-EVAL_VOICEMAIL = "Assess the conversation and determine if it is a voicemail."
-PROMPT_CONVERSATION = "Hello, this is Mark."
-EVAL_CONVERSATION = "A start of a conversation, not a voicemail."
+EVAL_SWITCH_LANGUAGE = EvalConfig(
+    prompt="Say something in Spanish.",
+    eval="The user talks in Spanish.",
+)
 
-TESTS_07 = [
-    # 07 series
-    ("07-interruptible.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07-interruptible-cartesia-http.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07a-interruptible-speechmatics.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07aa-interruptible-soniox.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07ab-interruptible-inworld-http.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07ac-interruptible-asyncai.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07ac-interruptible-asyncai-http.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07b-interruptible-langchain.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07c-interruptible-deepgram.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07d-interruptible-elevenlabs.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    (
-        "07d-interruptible-elevenlabs-http.py",
-        PROMPT_SIMPLE_MATH,
-        EVAL_SIMPLE_MATH,
-        BOT_SPEAKS_FIRST,
-    ),
-    ("07e-interruptible-playht.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07e-interruptible-playht-http.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07f-interruptible-azure.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07g-interruptible-openai.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07h-interruptible-openpipe.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07j-interruptible-gladia.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07k-interruptible-lmnt.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07l-interruptible-groq.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07m-interruptible-aws.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07n-interruptible-gemini.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07n-interruptible-google.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07o-interruptible-assemblyai.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07q-interruptible-rime.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07q-interruptible-rime-http.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07r-interruptible-riva-nim.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    (
-        "07s-interruptible-google-audio-in.py",
-        PROMPT_SIMPLE_MATH,
-        EVAL_SIMPLE_MATH,
-        BOT_SPEAKS_FIRST,
-    ),
-    ("07t-interruptible-fish.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07v-interruptible-neuphonic.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07v-interruptible-neuphonic-http.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07w-interruptible-fal.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07y-interruptible-minimax.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    ("07z-interruptible-sarvam.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
+EVAL_VISION_CAMERA = EvalConfig(
+    prompt=("Briefly describe what you see.", Image.open(ASSETS_DIR / "cat.jpg")),
+    eval="The user provides a cat description.",
+)
+
+
+def EVAL_VISION_IMAGE(*, eval_speaks_first: bool = False):
+    return EvalConfig(
+        prompt="Briefly describe this image.",
+        eval="The user provides a cat description.",
+        eval_speaks_first=eval_speaks_first,
+        runner_args_body={
+            "image_path": ASSETS_DIR / "cat.jpg",
+            "question": "Briefly describe this image.",
+        },
+    )
+
+
+EVAL_VOICEMAIL = EvalConfig(
+    prompt="Please leave a message.",
+    eval="The user provides a reasonable voicemail message.",
+    eval_speaks_first=True,
+)
+
+EVAL_CONVERSATION = EvalConfig(
+    prompt="Hello, this is Mark.",
+    eval="The user provides any reasonable conversational response to the greeting.",
+    eval_speaks_first=True,
+)
+
+EVAL_FLIGHT_STATUS = EvalConfig(
+    prompt="Check the status of flight AA100.",
+    eval="The user says something about the status of flight AA100, such as whether it's on time or delayed.",
+)
+
+EVAL_ORDER = EvalConfig(
+    prompt="I'd like to order a chocolate iced doughnut and a regular brewed coffee.",
+    eval="The user acknowledges the order of a chocolate iced doughnut and regular brewed coffee.",
+    eval_speaks_first=True,
+)
+
+EVAL_COMPLETE_TURN = EvalConfig(
+    prompt="I would go to Japan because I love the culture and want to try authentic ramen.",
+    eval="The user provides a relevant response about Japan or travel, showing the conversation continues normally.",
+)
+
+
+TESTS_VOICE = [
+    ("voice/voice-cartesia.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-cartesia-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-speechmatics.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-speechmatics-vad.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-langchain.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-deepgram.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-deepgram-flux.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-deepgram-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-elevenlabs.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-elevenlabs-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-xai.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-azure.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-azure-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-openai.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-openai-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-gladia.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-gladia-vad.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-lmnt.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-groq.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-aws.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-aws-strands.py", EVAL_WEATHER),
+    ("voice/voice-google-gemini-tts.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-google.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-google-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-assemblyai.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-krisp-viva.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-rime.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-rime-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-nvidia.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-google-audio-in.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-fish.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-neuphonic.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-neuphonic-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-fal.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-minimax.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-sarvam.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-sarvam-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-soniox.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-inworld.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-inworld-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-asyncai.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-asyncai-http.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-aicoustics.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-hume.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-gradium.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-camb.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-piper.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-kokoro.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-resemble.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-smallest.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-mistral.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-openai-responses.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-openai-responses-http.py", EVAL_SIMPLE_MATH),
     # Needs a local XTTS docker instance running.
-    # ("07i-interruptible-xtts.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    # Needs a Krisp license.
-    # ("07p-interruptible-krisp.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    # Needs GPU resources.
-    # ("07u-interruptible-ultravox.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
+    # ("voice/voice-xtts.py", EVAL_SIMPLE_MATH),
 ]
 
-TESTS_12 = [
-    ("12-describe-video.py", PROMPT_VISION, EVAL_VISION, BOT_SPEAKS_FIRST),
-    ("12a-describe-video-gemini-flash.py", PROMPT_VISION, EVAL_VISION, BOT_SPEAKS_FIRST),
-    ("12b-describe-video-gpt-4o.py", PROMPT_VISION, EVAL_VISION, BOT_SPEAKS_FIRST),
-    ("12c-describe-video-anthropic.py", PROMPT_VISION, EVAL_VISION, BOT_SPEAKS_FIRST),
+TESTS_VISION = [
+    ("vision/vision-openai.py", EVAL_VISION_IMAGE(eval_speaks_first=True)),
+    ("vision/vision-openai-responses.py", EVAL_VISION_IMAGE(eval_speaks_first=True)),
+    ("vision/vision-openai-responses-http.py", EVAL_VISION_IMAGE(eval_speaks_first=True)),
+    ("vision/vision-anthropic.py", EVAL_VISION_IMAGE(eval_speaks_first=True)),
+    ("vision/vision-aws.py", EVAL_VISION_IMAGE(eval_speaks_first=True)),
+    ("vision/vision-gemini-flash.py", EVAL_VISION_IMAGE(eval_speaks_first=True)),
+    ("vision/vision-moondream.py", EVAL_VISION_IMAGE()),
 ]
 
-TESTS_14 = [
-    ("14-function-calling.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14a-function-calling-anthropic.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14b-function-calling-anthropic-video.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14d-function-calling-video.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14e-function-calling-google.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14f-function-calling-groq.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14g-function-calling-grok.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14h-function-calling-azure.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14i-function-calling-fireworks.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14j-function-calling-nim.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14k-function-calling-cerebras.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14m-function-calling-openrouter.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14n-function-calling-perplexity.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14p-function-calling-gemini-vertex-ai.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14q-function-calling-qwen.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14r-function-calling-aws.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14v-function-calling-openai.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14w-function-calling-mistral.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("14x-function-calling-universal-context.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    (
-        "14y-function-calling-google-universal-context.py",
-        PROMPT_WEATHER,
-        EVAL_WEATHER,
-        BOT_SPEAKS_FIRST,
-    ),
-    (
-        "14z-function-calling-anthropic-universal-context.py",
-        PROMPT_WEATHER,
-        EVAL_WEATHER,
-        BOT_SPEAKS_FIRST,
-    ),
-    (
-        "14aa-function-calling-aws-universal-context.py",
-        PROMPT_WEATHER,
-        EVAL_WEATHER,
-        BOT_SPEAKS_FIRST,
-    ),
+# For a few major services, we also test parallel function calling.
+# (We don't bother doing this with every single service, as it's expensive and
+# most rely on the same OpenAI-compatible implementation.)
+TESTS_FUNCTION_CALLING = [
+    ("getting-started/07-function-calling.py", EVAL_WEATHER),
+    ("getting-started/07-function-calling.py", EVAL_WEATHER_AND_RESTAURANT),
+    ("function-calling/function-calling-openai-responses.py", EVAL_WEATHER),
+    ("function-calling/function-calling-openai-responses.py", EVAL_WEATHER_AND_RESTAURANT),
+    ("function-calling/function-calling-openai-responses-http.py", EVAL_WEATHER),
+    ("function-calling/function-calling-openai-responses-http.py", EVAL_WEATHER_AND_RESTAURANT),
+    ("function-calling/function-calling-anthropic.py", EVAL_WEATHER),
+    ("function-calling/function-calling-anthropic.py", EVAL_WEATHER_AND_RESTAURANT),
+    ("function-calling/function-calling-openai.py", EVAL_WEATHER),
+    ("function-calling/function-calling-google.py", EVAL_WEATHER),
+    ("function-calling/function-calling-google.py", EVAL_WEATHER_AND_RESTAURANT),
+    ("function-calling/function-calling-groq.py", EVAL_WEATHER),
+    ("function-calling/function-calling-grok.py", EVAL_WEATHER),
+    ("function-calling/function-calling-azure.py", EVAL_WEATHER),
+    ("function-calling/function-calling-fireworks.py", EVAL_WEATHER),
+    ("function-calling/function-calling-nvidia.py", EVAL_WEATHER),
+    ("function-calling/function-calling-cerebras.py", EVAL_WEATHER),
+    ("function-calling/function-calling-openrouter.py", EVAL_WEATHER),
+    ("function-calling/function-calling-perplexity.py", EVAL_WEATHER),
+    ("function-calling/function-calling-google-vertex.py", EVAL_WEATHER),
+    ("function-calling/function-calling-qwen.py", EVAL_WEATHER),
+    ("function-calling/function-calling-aws.py", EVAL_WEATHER),
+    ("function-calling/function-calling-sambanova.py", EVAL_WEATHER),
+    ("function-calling/function-calling-aws.py", EVAL_WEATHER_AND_RESTAURANT),
+    ("function-calling/function-calling-nebius.py", EVAL_WEATHER),
+    ("function-calling/function-calling-mistral.py", EVAL_WEATHER),
+    ("function-calling/function-calling-sarvam.py", EVAL_WEATHER),
+    ("function-calling/function-calling-novita.py", EVAL_WEATHER),
+    ("function-calling/function-calling-deepseek.py", EVAL_WEATHER),
+    # Video
+    ("function-calling/function-calling-anthropic-video.py", EVAL_VISION_CAMERA),
+    ("function-calling/function-calling-aws-video.py", EVAL_VISION_CAMERA),
+    ("function-calling/function-calling-google-video.py", EVAL_VISION_CAMERA),
+    ("function-calling/function-calling-moondream-video.py", EVAL_VISION_CAMERA),
+    ("function-calling/function-calling-openai-video.py", EVAL_VISION_CAMERA),
+    ("function-calling/function-calling-openai-responses-video.py", EVAL_VISION_CAMERA),
+    ("function-calling/function-calling-openai-responses-video-http.py", EVAL_VISION_CAMERA),
     # Currently not working.
-    # ("14c-function-calling-together.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    # ("14l-function-calling-deepseek.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    # ("14o-function-calling-gemini-openai-format.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
+    # ("function-calling/function-calling-together.py", EVAL_WEATHER),
 ]
 
-TESTS_15 = [
-    ("15a-switch-languages.py", PROMPT_SWITCH_LANGUAGE, EVAL_SWITCH_LANGUAGE, BOT_SPEAKS_FIRST),
+TESTS_FEATURES = [
+    ("features/features-switch-languages.py", EVAL_SWITCH_LANGUAGE),
+    ("features/features-voicemail-detection.py", EVAL_VOICEMAIL),
+    ("features/features-voicemail-detection.py", EVAL_CONVERSATION),
+    ("features/features-concurrent-llm-evaluation.py", EVAL_SIMPLE_MATH),
 ]
 
-TESTS_19 = [
-    ("19-openai-realtime-beta.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("19a-azure-realtime-beta.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("19b-openai-realtime-text.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
-    ("19b-openai-realtime-beta-text.py", PROMPT_WEATHER, EVAL_WEATHER, BOT_SPEAKS_FIRST),
+TESTS_REALTIME = [
+    ("realtime/realtime-openai.py", EVAL_WEATHER),
+    # OpenAI Realtime not released on Azure yet
+    # ("realtime/realtime-azure.py", EVAL_WEATHER),
+    ("realtime/realtime-openai-text.py", EVAL_WEATHER),
+    ("realtime/realtime-openai-live-video.py", EVAL_VISION_CAMERA),
+    ("realtime/realtime-gemini-live.py", EVAL_SIMPLE_MATH),
+    ("realtime/realtime-gemini-live-local-vad.py", EVAL_SIMPLE_MATH),
+    ("realtime/realtime-gemini-live-function-calling.py", EVAL_WEATHER),
+    ("realtime/realtime-gemini-live-video.py", EVAL_VISION_CAMERA),
+    ("realtime/realtime-gemini-live-google-search.py", EVAL_ONLINE_SEARCH),
+    ("realtime/realtime-gemini-live-vertex-function-calling.py", EVAL_WEATHER),
+    ("realtime/realtime-aws-nova-sonic.py", EVAL_SIMPLE_MATH),
+    ("realtime/realtime-ultravox.py", EVAL_ORDER),
+    ("realtime/realtime-grok.py", EVAL_WEATHER),
 ]
 
-TESTS_21 = [
-    ("21a-tavus-video-service.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
+TESTS_VIDEO_AVATAR = [
+    ("video-avatar/video-avatar-tavus-video-service.py", EVAL_SIMPLE_MATH),
+    ("video-avatar/video-avatar-heygen-video-service.py", EVAL_SIMPLE_MATH),
+    ("video-avatar/video-avatar-simli-video-service.py", EVAL_SIMPLE_MATH),
+    ("video-avatar/video-avatar-lemonslice-transport.py", EVAL_SIMPLE_MATH),
 ]
 
-TESTS_26 = [
-    ("26-gemini-multimodal-live.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    (
-        "26a-gemini-multimodal-live-transcription.py",
-        PROMPT_SIMPLE_MATH,
-        EVAL_SIMPLE_MATH,
-        BOT_SPEAKS_FIRST,
-    ),
-    (
-        "26b-gemini-multimodal-live-function-calling.py",
-        PROMPT_WEATHER,
-        EVAL_WEATHER,
-        BOT_SPEAKS_FIRST,
-    ),
-    ("26c-gemini-multimodal-live-video.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-    (
-        "26e-gemini-multimodal-google-search.py",
-        PROMPT_ONLINE_SEARCH,
-        EVAL_ONLINE_SEARCH,
-        BOT_SPEAKS_FIRST,
-    ),
-    # Currently not working.
-    # ("26d-gemini-multimodal-live-text.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
+TESTS_TURN_MANAGEMENT = [
+    ("turn-management/turn-management-filter-incomplete-turns.py", EVAL_COMPLETE_TURN),
 ]
 
-TESTS_27 = [
-    ("27-simli-layer.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-]
-
-TESTS_40 = [
-    ("40-aws-nova-sonic.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-]
-
-TESTS_43 = [
-    ("43a-heygen-video-service.py", PROMPT_SIMPLE_MATH, EVAL_SIMPLE_MATH, BOT_SPEAKS_FIRST),
-]
-
-TESTS_44 = [
-    ("44-voicemail-detection.py", PROMPT_VOICEMAIL, EVAL_VOICEMAIL, USER_SPEAKS_FIRST),
-    ("44-voicemail-detection.py", PROMPT_CONVERSATION, EVAL_CONVERSATION, USER_SPEAKS_FIRST),
+TESTS_THINKING = [
+    ("thinking/thinking-anthropic.py", EVAL_SIMPLE_MATH),
+    ("thinking/thinking-google.py", EVAL_SIMPLE_MATH),
+    ("thinking/thinking-functions-anthropic.py", EVAL_FLIGHT_STATUS),
+    ("thinking/thinking-functions-google.py", EVAL_FLIGHT_STATUS),
 ]
 
 TESTS = [
-    *TESTS_07,
-    *TESTS_12,
-    *TESTS_14,
-    *TESTS_15,
-    *TESTS_19,
-    *TESTS_21,
-    *TESTS_26,
-    *TESTS_27,
-    *TESTS_40,
-    *TESTS_43,
-    *TESTS_44,
+    *TESTS_VOICE,
+    *TESTS_VISION,
+    *TESTS_FUNCTION_CALLING,
+    *TESTS_FEATURES,
+    *TESTS_REALTIME,
+    *TESTS_VIDEO_AVATAR,
+    *TESTS_TURN_MANAGEMENT,
+    *TESTS_THINKING,
 ]
 
 
@@ -252,9 +283,9 @@ async def main(args: argparse.Namespace):
 
     # Parse test config: (test, prompt, eval, user_speaks_first)
     for test_config in TESTS:
-        test, prompt, eval, user_speaks_first = test_config
+        test, eval_config = test_config
 
-        await runner.run_eval(test, prompt, eval, user_speaks_first)
+        await runner.run_eval(test, eval_config)
 
     runner.print_results()
 
