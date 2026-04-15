@@ -190,8 +190,10 @@ class AssemblyAISTTService(WebsocketSTTService):
                 - Uses AssemblyAI API defaults for all parameters (unless user explicitly sets them)
                 - Emits UserStarted/StoppedSpeakingFrame from STT
                 - No ForceEndpoint on VAD stop
-            vad_enabled: Dubit compatibility mode. When enabled, final
-                transcriptions are wrapped with ordered Dubit turn frames.
+            vad_enabled: Compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered
+                ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
+                markers.
             should_interrupt: Whether to interrupt the bot when the user starts speaking
                 in AssemblyAI turn detection mode (vad_force_turn_endpoint=False). Only applies
                 when using AssemblyAI's built-in turn detection. Defaults to True.
@@ -754,7 +756,7 @@ class AssemblyAISTTService(WebsocketSTTService):
                         language,
                         message,
                     ),
-                    use_dubit_frames=self.vad_enabled,
+                    wrap_with_turn_frames=self.vad_enabled,
                 )
                 await self._trace_transcription(transcript_text, True, language)
                 await self.stop_processing_metrics()
@@ -784,7 +786,7 @@ class AssemblyAISTTService(WebsocketSTTService):
                         message,
                         finalized=True,
                     ),
-                    use_dubit_frames=self.vad_enabled,
+                    wrap_with_turn_frames=self.vad_enabled,
                 )
                 await self._trace_transcription(transcript_text, True, language)
                 await self.stop_processing_metrics()

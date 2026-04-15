@@ -19,8 +19,6 @@ from websockets.protocol import State
 
 from pipecat.frames.frames import (
     AudioRawFrame,
-    DubitUserStartedSpeakingFrame,
-    DubitUserStoppedSpeakingFrame,
     ErrorFrame,
     Frame,
     InterruptionFrame,
@@ -30,6 +28,8 @@ from pipecat.frames.frames import (
     STTMuteFrame,
     STTUpdateSettingsFrame,
     TranscriptionFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -456,18 +456,18 @@ class STTService(AIService):
         await self.broadcast_frame(STTMetadataFrame, service_name=self.name, ttfs_p99_latency=ttfs)
 
     async def _push_transcription_with_turn_frames(
-        self, frame: TranscriptionFrame, *, use_dubit_frames: bool = False
+        self, frame: TranscriptionFrame, *, wrap_with_turn_frames: bool = False
     ):
-        """Push a final transcription with optional ordered Dubit turn markers.
+        """Push a final transcription with optional standard speaking markers.
 
-        Dubit compatibility mode preserves the old fork behavior where a final
-        transcription is wrapped by regular ordered frames instead of relying on
-        upstream user-turn control frames.
+        Compatibility mode preserves the old fork behavior where a final
+        transcription is wrapped by regular ordered user speaking frames instead
+        of relying on a service-specific turn control path.
         """
-        if use_dubit_frames:
-            await self.push_frame(DubitUserStartedSpeakingFrame())
+        if wrap_with_turn_frames:
+            await self.push_frame(UserStartedSpeakingFrame())
             await self.push_frame(frame)
-            await self.push_frame(DubitUserStoppedSpeakingFrame())
+            await self.push_frame(UserStoppedSpeakingFrame())
         else:
             await self.push_frame(frame)
 

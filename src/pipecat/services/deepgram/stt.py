@@ -332,8 +332,10 @@ class DeepgramSTTService(STTService):
                     fields and direct init parameters for connection-level config.
 
             addons: Additional Deepgram features to enable.
-            vad_enabled: Dubit compatibility mode. When enabled, final
-                transcriptions are wrapped with ordered Dubit turn frames.
+            vad_enabled: Compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered
+                ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
+                markers.
             settings: Runtime-updatable settings. When provided alongside
                 ``live_options``, ``settings`` values take precedence (applied
                 after the ``live_options`` merge).
@@ -684,7 +686,7 @@ class DeepgramSTTService(STTService):
                             language,
                             result=message,
                         ),
-                        use_dubit_frames=self.vad_enabled,
+                        wrap_with_turn_frames=self.vad_enabled,
                     )
                     await self._handle_transcription(transcript, is_final, language)
                     await self.stop_processing_metrics()

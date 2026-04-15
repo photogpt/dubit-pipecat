@@ -254,8 +254,10 @@ class GladiaSTTService(WebsocketSTTService):
                     Use ``settings=GladiaSTTService.Settings(...)`` for runtime-updatable
                     fields and direct init parameters for encoding/bit_depth/channels.
 
-            vad_enabled: Dubit compatibility mode. When enabled, final
-                transcriptions are wrapped with ordered Dubit turn frames.
+            vad_enabled: Compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered
+                ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
+                markers.
             max_buffer_size: Maximum size of audio buffer in bytes. Defaults to 20MB.
             should_interrupt: Determine whether the bot should be interrupted when
                 Gladia VAD detects user speech. Defaults to True.
@@ -691,7 +693,7 @@ class GladiaSTTService(WebsocketSTTService):
                                 language,
                                 result=content,
                             ),
-                            use_dubit_frames=self.vad_enabled,
+                            wrap_with_turn_frames=self.vad_enabled,
                         )
                         await self._handle_transcription(
                             transcript=transcript,

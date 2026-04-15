@@ -98,8 +98,10 @@ class AzureSTTService(STTService):
             language_code: Dubit compatibility alias for passing a raw Azure
                 language code such as ``"en-US"`` directly.
             sample_rate: Audio sample rate in Hz. If None, uses service default.
-            vad_enabled: Dubit compatibility mode. When enabled, final
-                transcriptions are wrapped with ordered Dubit turn frames.
+            vad_enabled: Compatibility mode. When enabled, final
+                transcriptions are wrapped with ordered
+                ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
+                markers.
             private_endpoint: Private endpoint for STT behind firewall.
                 See https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-services-private-link?tabs=portal
             endpoint_id: Custom model endpoint id.
@@ -301,7 +303,7 @@ class AzureSTTService(STTService):
             )
             asyncio.run_coroutine_threadsafe(
                 self._push_transcription_with_turn_frames(
-                    frame, use_dubit_frames=self.vad_enabled
+                    frame, wrap_with_turn_frames=self.vad_enabled
                 ),
                 self.get_event_loop(),
             )
