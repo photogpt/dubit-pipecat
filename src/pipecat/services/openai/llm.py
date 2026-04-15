@@ -10,6 +10,12 @@ from typing import Optional
 
 from openai import NOT_GIVEN
 
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMAssistantAggregatorParams,
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 
 
@@ -95,3 +101,25 @@ class OpenAILLMService(BaseOpenAILLMService):
             default_settings.apply_update(settings)
 
         super().__init__(service_tier=service_tier, settings=default_settings, **kwargs)
+
+    def create_context_aggregator(
+        self,
+        context: LLMContext,
+        *,
+        user_params: Optional[LLMUserAggregatorParams] = None,
+        assistant_params: Optional[LLMAssistantAggregatorParams] = None,
+        aggregator_type: str = "pipecat",
+    ) -> LLMContextAggregatorPair:
+        """Create a universal context aggregator pair.
+
+        The optional ``aggregator_type="dubit"`` compatibility mode preserves
+        ordered Dubit user-turn frames by selecting Dubit external turn
+        strategies for the user aggregator.
+        """
+
+        return LLMContextAggregatorPair(
+            context,
+            user_params=user_params,
+            assistant_params=assistant_params,
+            aggregator_type=aggregator_type,
+        )

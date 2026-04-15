@@ -28,6 +28,8 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    DubitUserStartedSpeakingFrame,
+    DubitUserStoppedSpeakingFrame,
     EndFrame,
     Frame,
     FunctionCallCancelFrame,
@@ -85,6 +87,7 @@ from pipecat.turns.user_stop import BaseUserTurnStopStrategy, UserTurnStoppedPar
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from pipecat.turns.user_turn_controller import UserTurnController
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.turns.user_turn_strategies import DubitExternalUserTurnStrategies
 from pipecat.utils.context.llm_context_summarization import (
     LLMAutoContextSummarizationConfig,
     LLMContextSummarizationConfig,
@@ -617,6 +620,8 @@ class LLMUserAggregator(LLMContextAggregator):
         should_mute_frame = self._user_is_muted and isinstance(
             frame,
             (
+                DubitUserStartedSpeakingFrame,
+                DubitUserStoppedSpeakingFrame,
                 InterruptionFrame,
                 VADUserStartedSpeakingFrame,
                 VADUserStoppedSpeakingFrame,
@@ -963,10 +968,10 @@ class LLMAssistantAggregator(LLMContextAggregator):
             await self._handle_user_image_frame(frame)
         elif isinstance(frame, AssistantImageRawFrame):
             await self._handle_assistant_image_frame(frame)
-        elif isinstance(frame, UserStartedSpeakingFrame):
+        elif isinstance(frame, (UserStartedSpeakingFrame, DubitUserStartedSpeakingFrame)):
             self._user_speaking = True
             await self.push_frame(frame, direction)
-        elif isinstance(frame, UserStoppedSpeakingFrame):
+        elif isinstance(frame, (UserStoppedSpeakingFrame, DubitUserStoppedSpeakingFrame)):
             self._user_speaking = False
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStartedSpeakingFrame):
@@ -1477,6 +1482,7 @@ class LLMContextAggregatorPair:
         *,
         user_params: Optional[LLMUserAggregatorParams] = None,
         assistant_params: Optional[LLMAssistantAggregatorParams] = None,
+        aggregator_type: str = "pipecat",
     ):
         """Initialize the LLM context aggregator pair.
 
@@ -1484,9 +1490,17 @@ class LLMContextAggregatorPair:
             context: The context to be managed by the aggregators.
             user_params: Parameters for the user context aggregator.
             assistant_params: Parameters for the assistant context aggregator.
+            aggregator_type: Aggregator compatibility mode. Use ``"dubit"``
+                to preserve ordered Dubit user-turn frame semantics.
         """
         user_params = user_params or LLMUserAggregatorParams()
         assistant_params = assistant_params or LLMAssistantAggregatorParams()
+        if aggregator_type == "dubit" and user_params.user_turn_strategies is None:
+            user_params.user_turn_strategies = DubitExternalUserTurnStrategies()
+        elif aggregator_type != "pipecat" and aggregator_type != "dubit":
+            raise ValueError(
+                f"Unknown aggregator_type '{aggregator_type}'. Expected 'pipecat' or 'dubit'."
+            )
         self._user = LLMUserAggregator(context, params=user_params)
         self._assistant = LLMAssistantAggregator(context, params=assistant_params)
 

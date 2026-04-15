@@ -545,6 +545,30 @@ class LLMThoughtEndFrame(ControlFrame):
 
 
 @dataclass
+class CustomUserTranscriptionFrame(Frame):
+    """User-specific transcription frame kept for Dubit compatibility."""
+
+    text: str
+    timestamp: str
+
+    def __str__(self):
+        pts = format_pts(self.pts)
+        return f"{self.name}(pts: {pts}, text: [{self.text}], timestamp: {self.timestamp})"
+
+
+@dataclass
+class CustomAssistantTranscriptionFrame(Frame):
+    """Assistant-specific transcription frame kept for Dubit compatibility."""
+
+    text: str
+    timestamp: str
+
+    def __str__(self):
+        pts = format_pts(self.pts)
+        return f"{self.name}(pts: {pts}, text: [{self.text}], timestamp: {self.timestamp})"
+
+
+@dataclass
 class LLMRunFrame(DataFrame):
     """Frame to trigger LLM processing with current context.
 
@@ -898,6 +922,32 @@ class UserStoppedSpeakingFrame(SystemFrame):
 
     Emitted when the user turn ends. This usually coincides with the start of
     the bot turn.
+    """
+
+    pass
+
+
+@dataclass
+class DubitUserStartedSpeakingFrame(Frame):
+    """Ordered user-turn start frame used by Dubit-specific pipelines.
+
+    Unlike :class:`UserStartedSpeakingFrame`, this frame is a regular
+    :class:`Frame` rather than a :class:`SystemFrame`. This preserves its
+    relative ordering with surrounding data frames such as
+    :class:`TranscriptionFrame`.
+    """
+
+    pass
+
+
+@dataclass
+class DubitUserStoppedSpeakingFrame(Frame):
+    """Ordered user-turn stop frame used by Dubit-specific pipelines.
+
+    Unlike :class:`UserStoppedSpeakingFrame`, this frame is a regular
+    :class:`Frame` rather than a :class:`SystemFrame`. This preserves its
+    relative ordering with surrounding data frames such as
+    :class:`TranscriptionFrame`.
     """
 
     pass

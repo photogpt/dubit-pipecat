@@ -10,6 +10,8 @@ import asyncio
 from typing import Optional, Type
 
 from pipecat.frames.frames import (
+    DubitUserStartedSpeakingFrame,
+    DubitUserStoppedSpeakingFrame,
     Frame,
     InterimTranscriptionFrame,
     TranscriptionFrame,
@@ -158,6 +160,10 @@ class UserTurnController(BaseObject):
             await self._handle_user_started_speaking(frame)
         elif isinstance(frame, UserStoppedSpeakingFrame):
             await self._handle_user_stopped_speaking(frame)
+        elif isinstance(frame, DubitUserStartedSpeakingFrame):
+            await self._handle_dubit_user_started_speaking(frame)
+        elif isinstance(frame, DubitUserStoppedSpeakingFrame):
+            await self._handle_dubit_user_stopped_speaking(frame)
         elif isinstance(frame, VADUserStartedSpeakingFrame):
             await self._handle_vad_user_started_speaking(frame)
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
@@ -206,6 +212,14 @@ class UserTurnController(BaseObject):
         self._user_speaking = False
 
         # The user stopped talking, let's reset the user turn timeout.
+        self._user_turn_stop_timeout_event.set()
+
+    async def _handle_dubit_user_started_speaking(self, frame: DubitUserStartedSpeakingFrame):
+        self._user_speaking = True
+        self._user_turn_stop_timeout_event.set()
+
+    async def _handle_dubit_user_stopped_speaking(self, frame: DubitUserStoppedSpeakingFrame):
+        self._user_speaking = False
         self._user_turn_stop_timeout_event.set()
 
     async def _handle_vad_user_started_speaking(self, frame: VADUserStartedSpeakingFrame):
