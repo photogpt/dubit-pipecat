@@ -7,6 +7,7 @@
 """Azure Cognitive Services Text-to-Speech service implementations."""
 
 import asyncio
+# Dubit Edit: parse and preserve allowed SSML tags with attributes before escaping text.
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -170,6 +171,7 @@ class AzureBaseTTSService:
         language = self._settings.language
 
         # Escape special characters
+        # Dubit Edit: keep <say-as ...> SSML tags intact while escaping surrounding text.
         escaped_text = self._escape_text_with_tag_support(text, [("<say-as>", "</say-as>")])
 
         ssml = (
@@ -218,6 +220,7 @@ class AzureBaseTTSService:
 
         return ssml
 
+    # Dubit Edit: preserve selected SSML tag pairs because translation prompts emit <say-as>.
     def _escape_text_with_tag_support(
         self, text: str, tag_pairs: list[tuple[str, str]] | None = None
     ) -> str:

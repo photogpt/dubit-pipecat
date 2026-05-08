@@ -851,6 +851,7 @@ class DailyTransportClient(EventHandler):
         self._client.update_subscription_profiles(
             {
                 "base": {
+                    # Dubit Edit: do not subscribe to participant audio until explicitly captured.
                     "microphone": "unsubscribed",
                     "camera": "unsubscribed",
                     "screenVideo": "unsubscribed",
@@ -2954,7 +2955,7 @@ class DailyTransport(BaseTransport):
         id = participant["id"]
         logger.info(f"Participant joined {id}")
 
-        # Disabled because we do not want to capture any audio by default
+        # Dubit Edit: disable automatic audio capture; bots opt into capture explicitly.
         # if self._input and self._params.audio_in_enabled and self._params.audio_in_user_tracks:
         #     await self._input.capture_participant_audio(
         #         id, "microphone", self._client.in_sample_rate

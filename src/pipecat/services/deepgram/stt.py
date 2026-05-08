@@ -306,6 +306,7 @@ class DeepgramSTTService(STTService):
         mip_opt_out: bool | None = None,
         live_options: LiveOptions | None = None,
         addons: dict | None = None,
+        # Dubit Edit: keep opt-in STT transcript wrapping for Dubit bot pipelines.
         vad_enabled: bool = False,
         settings: Settings | None = None,
         ttfs_p99_latency: float | None = DEEPGRAM_TTFS_P99,
@@ -333,7 +334,7 @@ class DeepgramSTTService(STTService):
                     fields and direct init parameters for connection-level config.
 
             addons: Additional Deepgram features to enable.
-            vad_enabled: Compatibility mode. When enabled, final
+            vad_enabled: Dubit pipeline mode. When enabled, final
                 transcriptions are wrapped with ordered
                 ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
                 markers.
@@ -426,6 +427,7 @@ class DeepgramSTTService(STTService):
         self._callback_method = callback_method
         self._tag = tag
         self._mip_opt_out = mip_opt_out
+        # Dubit Edit: remember whether final transcripts should be wrapped in standard turn frames.
         self.vad_enabled = vad_enabled
 
         # Build client - support optional custom base URL via DeepgramClientEnvironment
@@ -699,6 +701,7 @@ class DeepgramSTTService(STTService):
                     from_finalize = getattr(message, "from_finalize", False) or False
                     if from_finalize:
                         self.confirm_finalize()
+                    # Dubit Edit: vad_enabled preserves Dubit ordering around final transcripts.
                     await self._push_transcription_with_turn_frames(
                         TranscriptionFrame(
                             transcript,

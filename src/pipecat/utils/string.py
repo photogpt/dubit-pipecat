@@ -101,6 +101,7 @@ UNAMBIGUOUS_SENTENCE_ENDING_PUNCTUATION: frozenset[str] = (
 )
 
 StartEndTags = tuple[str, str]
+# Dubit Edit: detect simple tag specs so runtime tags with attributes can match.
 _SIMPLE_TAG_PATTERN = re.compile(r"^<([a-zA-Z0-9_:-]+)>$")
 
 
@@ -191,7 +192,7 @@ def parse_start_end_tags(
     This function returns the index in the text where parsing should continue
     in the next call and the current or new tags.
 
-    Dubit EDIT: support for attributes like <say-as attribute="value">...</say-as>
+    Supports attributes like <say-as attribute="value">...</say-as>.
     Args:
         text: The text to be parsed.
         tags: List of tuples containing start and end tags.
@@ -204,11 +205,13 @@ def parse_start_end_tags(
     # If we are already inside a tag, check if the end tag is in the text.
     if current_tag:
         _, end_tag = current_tag
+        # Dubit Edit: resume parsing immediately after the matched closing tag.
         end_pos = text.find(end_tag, current_tag_index)
         if end_pos != -1:
             return (None, end_pos + len(end_tag))
         return (current_tag, current_tag_index)
 
+    # Dubit Edit: only inspect new text after the last parsed index.
     text_slice = text[current_tag_index:]
     if not text_slice:
         return (None, current_tag_index)
@@ -219,7 +222,7 @@ def parse_start_end_tags(
 
         if simple_match:
             tag_name = simple_match.group(1)
-            # Regex to find <tag_name ...> or <tag_name>
+            # Dubit Edit: match <tag_name ...> or <tag_name> for configured simple tags.
             actual_start_tag_regex = re.compile(rf"<{re.escape(tag_name)}(?:\s+[^>]*)?>")
             start_tag_count = len(list(actual_start_tag_regex.finditer(text_slice)))
         else:

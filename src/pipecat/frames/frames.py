@@ -539,9 +539,10 @@ class LLMThoughtEndFrame(ControlFrame):
         return f"{self.name}(pts: {pts}, signature: {self.signature})"
 
 
+# Dubit Edit: keep transcript frames consumed by the bot server DB transcript writer.
 @dataclass
 class CustomUserTranscriptionFrame(Frame):
-    """User-specific transcription frame kept for Dubit compatibility."""
+    """User-specific transcription frame used by Dubit bot server processors."""
 
     text: str
     timestamp: str
@@ -553,7 +554,7 @@ class CustomUserTranscriptionFrame(Frame):
 
 @dataclass
 class CustomAssistantTranscriptionFrame(Frame):
-    """Assistant-specific transcription frame kept for Dubit compatibility."""
+    """Assistant-specific transcription frame used by Dubit bot server processors."""
 
     text: str
     timestamp: str
@@ -962,6 +963,7 @@ class UserStoppedSpeakingFrame(SystemFrame):
     pass
 
 
+# Dubit Edit: define ordered non-system turn markers for Dubit context aggregation only.
 @dataclass
 class DubitUserStartedSpeakingFrame(Frame):
     """Ordered user-turn start frame used by Dubit-specific pipelines.

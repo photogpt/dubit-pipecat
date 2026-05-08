@@ -75,9 +75,11 @@ class AzureSTTService(STTService):
         *,
         api_key: str,
         region: str | None = None,
+        # Dubit Edit: accept raw Azure language strings used by existing bots.
         language: Language | str | None = Language.EN_US,
         language_code: str | None = None,
         sample_rate: int | None = None,
+        # Dubit Edit: keep opt-in STT transcript wrapping for Dubit bot pipelines.
         vad_enabled: bool = False,
         private_endpoint: str | None = None,
         endpoint_id: str | None = None,
@@ -96,10 +98,10 @@ class AzureSTTService(STTService):
                 .. deprecated:: 0.0.105
                     Use ``settings=AzureSTTService.Settings(language=...)`` instead.
 
-            language_code: Dubit compatibility alias for passing a raw Azure
+            language_code: Dubit alias for passing a raw Azure
                 language code such as ``"en-US"`` directly.
             sample_rate: Audio sample rate in Hz. If None, uses service default.
-            vad_enabled: Compatibility mode. When enabled, final
+            vad_enabled: Dubit pipeline mode. When enabled, final
                 transcriptions are wrapped with ordered
                 ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
                 markers.
@@ -119,6 +121,7 @@ class AzureSTTService(STTService):
         )
 
         # 2. Apply direct init arg overrides (deprecated)
+        # Dubit Edit: language_code is a no-warning alias for raw Azure language codes.
         if language_code is not None:
             default_settings.language = language_code
         elif language is not None and language != Language.EN_US:
@@ -137,6 +140,7 @@ class AzureSTTService(STTService):
             settings=default_settings,
             **kwargs,
         )
+        # Dubit Edit: remember whether final transcripts should be wrapped in standard turn frames.
         self.vad_enabled = vad_enabled
 
         recognition_language = assert_given(
@@ -307,6 +311,7 @@ class AzureSTTService(STTService):
             asyncio.run_coroutine_threadsafe(
                 self._handle_transcription(event.result.text, True, language), self.get_event_loop()
             )
+            # Dubit Edit: vad_enabled preserves Dubit ordering around final transcripts.
             asyncio.run_coroutine_threadsafe(
                 self._push_transcription_with_turn_frames(
                     frame, wrap_with_turn_frames=self.vad_enabled

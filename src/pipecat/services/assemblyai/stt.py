@@ -155,6 +155,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         encoding: str = "pcm_s16le",
         connection_params: AssemblyAIConnectionParams | None = None,
         vad_force_turn_endpoint: bool = True,
+        # Dubit Edit: keep opt-in STT transcript wrapping for Dubit bot pipelines.
         vad_enabled: bool = False,
         should_interrupt: bool = True,
         speaker_format: str | None = None,
@@ -191,7 +192,7 @@ class AssemblyAISTTService(WebsocketSTTService):
                 - Uses AssemblyAI API defaults for all parameters (unless user explicitly sets them)
                 - Emits UserStarted/StoppedSpeakingFrame from STT
                 - No ForceEndpoint on VAD stop
-            vad_enabled: Compatibility mode. When enabled, final
+            vad_enabled: Dubit pipeline mode. When enabled, final
                 transcriptions are wrapped with ordered
                 ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
                 markers.
@@ -304,6 +305,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         self._vad_force_turn_endpoint = vad_force_turn_endpoint
         self._should_interrupt = should_interrupt
         self._speaker_format = speaker_format
+        # Dubit Edit: remember whether final transcripts should be wrapped in standard turn frames.
         self.vad_enabled = vad_enabled
 
         # Init-only audio config (not runtime-updatable)
@@ -681,6 +683,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         Only applies when using AssemblyAI's built-in turn detection. When using
         Pipecat turn detection, VAD + smart turn analyzer handle interruptions.
         """
+        # Dubit Edit: when wrapping ourselves, avoid AssemblyAI also emitting turn start frames.
         if self._vad_force_turn_endpoint or self.vad_enabled:
             return  # Pipecat mode: handled by aggregator
 
@@ -754,6 +757,7 @@ class AssemblyAISTTService(WebsocketSTTService):
                 if finalize_confirmed:
                     self.confirm_finalize()
                 logger.debug(f'{self} Transcript: "{transcript_text}"')
+                # Dubit Edit: vad_enabled preserves Dubit ordering around final transcripts.
                 await self._push_transcription_with_turn_frames(
                     TranscriptionFrame(
                         transcript_text,
@@ -783,6 +787,7 @@ class AssemblyAISTTService(WebsocketSTTService):
             # so UserStartedSpeakingFrame is guaranteed to be broadcast first.
             if is_final_turn:
                 # AssemblyAI controls finalization, just mark as finalized
+                # Dubit Edit: vad_enabled wraps this final turn instead of direct push/broadcast.
                 await self._push_transcription_with_turn_frames(
                     TranscriptionFrame(
                         transcript_text,
@@ -796,6 +801,7 @@ class AssemblyAISTTService(WebsocketSTTService):
                 )
                 await self._trace_transcription(transcript_text, True, language)
                 await self.stop_processing_metrics()
+                # Dubit Edit: avoid duplicate stop frames when the wrapper already emitted one.
                 if not self.vad_enabled:
                     # AAI is authoritative — emit UserStoppedSpeakingFrame immediately.
                     # broadcast_frame pushes downstream (same queue as TranscriptionFrame

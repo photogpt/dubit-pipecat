@@ -230,6 +230,7 @@ class GladiaSTTService(WebsocketSTTService):
         sample_rate: int | None = None,
         model: str | None = None,
         params: GladiaInputParams | None = None,
+        # Dubit Edit: keep opt-in STT transcript wrapping for Dubit bot pipelines.
         vad_enabled: bool = False,
         max_buffer_size: int = 1024 * 1024 * 20,  # 20MB default buffer
         should_interrupt: bool = True,
@@ -258,7 +259,7 @@ class GladiaSTTService(WebsocketSTTService):
                     Use ``settings=GladiaSTTService.Settings(...)`` for runtime-updatable
                     fields and direct init parameters for encoding/bit_depth/channels.
 
-            vad_enabled: Compatibility mode. When enabled, final
+            vad_enabled: Dubit pipeline mode. When enabled, final
                 transcriptions are wrapped with ordered
                 ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
                 markers.
@@ -350,6 +351,7 @@ class GladiaSTTService(WebsocketSTTService):
         # VAD state tracking
         self._is_speaking = False
         self._should_interrupt = should_interrupt
+        # Dubit Edit: remember whether final transcripts should be wrapped in standard turn frames.
         self.vad_enabled = vad_enabled
 
     def __str__(self):
@@ -613,6 +615,7 @@ class GladiaSTTService(WebsocketSTTService):
         Broadcasts UserStartedSpeakingFrame and optionally triggers interruption
         when VAD is enabled.
         """
+        # Dubit Edit: wrapper mode owns turn markers, so suppress Gladia VAD markers.
         if self.vad_enabled:
             return
         if not self._settings.enable_vad or self._is_speaking:
@@ -630,6 +633,7 @@ class GladiaSTTService(WebsocketSTTService):
 
         Broadcasts UserStoppedSpeakingFrame when VAD is enabled.
         """
+        # Dubit Edit: wrapper mode owns turn markers, so suppress Gladia VAD markers.
         if self.vad_enabled:
             return
         if not self._settings.enable_vad or not self._is_speaking:
@@ -695,6 +699,7 @@ class GladiaSTTService(WebsocketSTTService):
                     transcript = utterance["text"]
                     is_final = content["data"]["is_final"]
                     if is_final:
+                        # Dubit Edit: vad_enabled preserves Dubit ordering around final transcripts.
                         await self._push_transcription_with_turn_frames(
                             TranscriptionFrame(
                                 transcript,

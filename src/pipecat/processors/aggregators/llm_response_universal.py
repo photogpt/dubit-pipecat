@@ -29,6 +29,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    # Dubit Edit: context aggregation is the only framework consumer of Dubit turn markers.
     DubitUserStartedSpeakingFrame,
     DubitUserStoppedSpeakingFrame,
     EndFrame,
@@ -721,6 +722,8 @@ class LLMUserAggregator(LLMContextAggregator):
         should_mute_frame = self._user_is_muted and isinstance(
             frame,
             (
+                # Dubit Edit: muted-user mode must suppress Dubit turn markers
+                # like standard VAD markers.
                 DubitUserStartedSpeakingFrame,
                 DubitUserStoppedSpeakingFrame,
                 InterruptionFrame,
@@ -1076,6 +1079,7 @@ class LLMAssistantAggregator(LLMContextAggregator):
             await self._handle_user_image_frame(frame)
         elif isinstance(frame, AssistantImageRawFrame):
             await self._handle_assistant_image_frame(frame)
+        # Dubit Edit: translator assistant aggregation follows Dubit ordered user turn markers.
         elif isinstance(frame, (UserStartedSpeakingFrame, DubitUserStartedSpeakingFrame)):
             self._user_speaking = True
             await self.push_frame(frame, direction)
@@ -1601,6 +1605,8 @@ class LLMContextAggregatorPair:
         *,
         user_params: LLMUserAggregatorParams | None = None,
         assistant_params: LLMAssistantAggregatorParams | None = None,
+        # Dubit Edit: retain aggregator_type kwarg while preventing framework-level
+        # "dubit" mode leakage.
         aggregator_type: str = "pipecat",
         add_tool_change_messages: bool | None = None,
     ):
@@ -1610,8 +1616,8 @@ class LLMContextAggregatorPair:
             context: The context to be managed by the aggregators.
             user_params: Parameters for the user context aggregator.
             assistant_params: Parameters for the assistant context aggregator.
-            aggregator_type: Aggregator compatibility mode. Only ``"pipecat"``
-                is supported at framework level.
+            aggregator_type: Dubit guardrail. Only ``"pipecat"`` is supported
+                at framework level.
             add_tool_change_messages: When provided, sets the field of the
                 same name on both ``user_params`` and ``assistant_params``,
                 overriding any value already set on either. This is the
@@ -1625,6 +1631,8 @@ class LLMContextAggregatorPair:
         """
         user_params = user_params or LLMUserAggregatorParams()
         assistant_params = assistant_params or LLMAssistantAggregatorParams()
+        # Dubit Edit: callers may pass aggregator_type, but only explicit
+        # turn strategies are supported.
         if aggregator_type != "pipecat":
             raise ValueError(
                 f"Unknown aggregator_type '{aggregator_type}'. Expected 'pipecat'."

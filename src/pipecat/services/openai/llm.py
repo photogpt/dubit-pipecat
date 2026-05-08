@@ -9,6 +9,7 @@
 from openai import NOT_GIVEN
 
 from pipecat.adapters.services.open_ai_adapter import is_given
+# Dubit Edit: expose create_context_aggregator for Dubit bot wiring.
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregatorParams,
@@ -101,6 +102,7 @@ class OpenAILLMService(BaseOpenAILLMService):
 
         super().__init__(service_tier=service_tier, settings=default_settings, **kwargs)
 
+    # Dubit Edit: Dubit bots call service.create_context_aggregator(...).
     def create_context_aggregator(
         self,
         context: LLMContext,

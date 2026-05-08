@@ -29,6 +29,7 @@ from pipecat.frames.frames import (
     STTMuteFrame,
     STTUpdateSettingsFrame,
     TranscriptionFrame,
+    # Dubit Edit: STT transcript wrapping emits standard user turn frames.
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
@@ -477,14 +478,15 @@ class STTService(AIService):
             logger.warning(f"{self.name}: ttfs_p99_latency not set, using default {ttfs}s")
         await self.broadcast_frame(STTMetadataFrame, service_name=self.name, ttfs_p99_latency=ttfs)
 
+    # Dubit Edit: preserve Dubit STT behavior by optionally wrapping final transcripts.
     async def _push_transcription_with_turn_frames(
         self, frame: TranscriptionFrame, *, wrap_with_turn_frames: bool = False
     ):
         """Push a final transcription with optional standard speaking markers.
 
-        Compatibility mode preserves the old fork behavior where a final
-        transcription is wrapped by regular ordered user speaking frames instead
-        of relying on a service-specific turn control path.
+        Dubit pipeline mode wraps a final transcription with regular ordered
+        user speaking frames instead of relying on a service-specific turn
+        control path.
         """
         if wrap_with_turn_frames:
             await self.push_frame(UserStartedSpeakingFrame())
