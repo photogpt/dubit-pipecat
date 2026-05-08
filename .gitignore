@@ -62,7 +62,3 @@ docs/api/api
 
 # Pipecat
 whisker_setup.py
-
-.codex
-
-migration-to-v1-with-compat.md
