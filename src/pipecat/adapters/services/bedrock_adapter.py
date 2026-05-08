@@ -10,7 +10,7 @@ import base64
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict, cast
 
 from loguru import logger
 
@@ -29,9 +29,9 @@ from pipecat.processors.aggregators.llm_context import (
 class AWSBedrockLLMInvocationParams(TypedDict):
     """Context-based parameters for invoking AWS Bedrock's LLM API."""
 
-    system: Optional[List[dict[str, Any]]]  # [{"text": "system message"}]
-    messages: List[dict[str, Any]]
-    tools: List[dict[str, Any]]
+    system: list[dict[str, Any]] | None  # [{"text": "system message"}]
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]]
     tool_choice: LLMContextToolChoice
 
 
@@ -48,7 +48,7 @@ class AWSBedrockLLMAdapter(BaseLLMAdapter[AWSBedrockLLMInvocationParams]):
         return "aws"
 
     def get_llm_invocation_params(
-        self, context: LLMContext, *, system_instruction: Optional[str] = None
+        self, context: LLMContext, *, system_instruction: str | None = None
     ) -> AWSBedrockLLMInvocationParams:
         """Get AWS Bedrock-specific LLM invocation parameters from a universal LLM context.
 
@@ -68,18 +68,21 @@ class AWSBedrockLLMAdapter(BaseLLMAdapter[AWSBedrockLLMInvocationParams]):
             system_instruction,
             discard_context_system=True,
         )
-        return {
-            "system": [{"text": effective_system}] if effective_system else None,
-            "messages": converted.messages,
-            # NOTE: LLMContext's tools are guaranteed to be a ToolsSchema (or NOT_GIVEN)
-            "tools": self.from_standard_tools(context.tools) or [],
-            # To avoid refactoring in AWSBedrockLLMService, we just pass through tool_choice.
-            # Eventually (when we don't have to maintain the non-LLMContext code path) we should do
-            # the conversion to Bedrock's expected format here rather than in AWSBedrockLLMService.
-            "tool_choice": context.tool_choice,
-        }
+        return cast(
+            AWSBedrockLLMInvocationParams,
+            {
+                "system": [{"text": effective_system}] if effective_system else None,
+                "messages": converted.messages,
+                # NOTE: LLMContext's tools are guaranteed to be a ToolsSchema (or NOT_GIVEN)
+                "tools": self.from_standard_tools(context.tools) or [],
+                # To avoid refactoring in AWSBedrockLLMService, we just pass through tool_choice.
+                # Eventually (when we don't have to maintain the non-LLMContext code path) we should do
+                # the conversion to Bedrock's expected format here rather than in AWSBedrockLLMService.
+                "tool_choice": context.tool_choice,
+            },
+        )
 
-    def get_messages_for_logging(self, context) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about AWS Bedrock.
 
         Removes or truncates sensitive data like image content for safe logging.
@@ -109,14 +112,14 @@ class AWSBedrockLLMAdapter(BaseLLMAdapter[AWSBedrockLLMInvocationParams]):
     class ConvertedMessages:
         """Container for Bedrock-formatted messages converted from universal context."""
 
-        messages: List[dict[str, Any]]
-        system: Optional[str]
+        messages: list[dict[str, Any]]
+        system: str | None
 
     def _from_universal_context_messages(
         self,
-        universal_context_messages: List[LLMContextMessage],
+        universal_context_messages: list[LLMContextMessage],
         *,
-        system_instruction: Optional[str] = None,
+        system_instruction: str | None = None,
     ) -> ConvertedMessages:
         system = None
 
@@ -213,35 +216,36 @@ class AWSBedrockLLMAdapter(BaseLLMAdapter[AWSBedrockLLMInvocationParams]):
                     ]
                 }
         """
-        message = copy.deepcopy(message)
-        if message["role"] == "tool":
+        # ChatCompletionMessageParam (input) and the dict shape Bedrock expects
+        # are different — work with the deepcopied message as a plain dict for
+        # the transformations below.
+        msg = cast(dict[str, Any], copy.deepcopy(message))
+        if msg["role"] == "tool":
             # Try to parse the content as JSON if it looks like JSON
             try:
-                if message["content"].strip().startswith("{") and message[
-                    "content"
-                ].strip().endswith("}"):
-                    content_json = json.loads(message["content"])
+                if msg["content"].strip().startswith("{") and msg["content"].strip().endswith("}"):
+                    content_json = json.loads(msg["content"])
                     tool_result_content = [{"json": content_json}]
                 else:
-                    tool_result_content = [{"text": message["content"]}]
+                    tool_result_content = [{"text": msg["content"]}]
             except (json.JSONDecodeError, ValueError, AttributeError):
-                tool_result_content = [{"text": message["content"]}]
+                tool_result_content = [{"text": msg["content"]}]
 
             return {
                 "role": "user",
                 "content": [
                     {
                         "toolResult": {
-                            "toolUseId": message["tool_call_id"],
+                            "toolUseId": msg["tool_call_id"],
                             "content": tool_result_content,
                         },
                     },
                 ],
             }
 
-        if message.get("tool_calls"):
-            tc = message["tool_calls"]
-            ret = {"role": "assistant", "content": []}
+        if msg.get("tool_calls"):
+            tc = msg["tool_calls"]
+            ret: dict[str, Any] = {"role": "assistant", "content": []}
             for tool_call in tc:
                 function = tool_call["function"]
                 arguments = json.loads(function["arguments"])
@@ -256,12 +260,12 @@ class AWSBedrockLLMAdapter(BaseLLMAdapter[AWSBedrockLLMInvocationParams]):
             return ret
 
         # Handle text content
-        content = message.get("content")
+        content = msg.get("content")
         if isinstance(content, str):
             if content == "":
-                return {"role": message["role"], "content": [{"text": "(empty)"}]}
+                return {"role": msg["role"], "content": [{"text": "(empty)"}]}
             else:
-                return {"role": message["role"], "content": [{"text": content}]}
+                return {"role": msg["role"], "content": [{"text": content}]}
         elif isinstance(content, list):
             new_content = []
             for item in content:
@@ -300,12 +304,12 @@ class AWSBedrockLLMAdapter(BaseLLMAdapter[AWSBedrockLLMInvocationParams]):
                     # Move image before the first text
                     image_item = new_content.pop(img_idx)
                 new_content.insert(first_txt_idx, image_item)
-            return {"role": message["role"], "content": new_content}
+            return {"role": msg["role"], "content": new_content}
 
-        return message
+        return msg
 
     @staticmethod
-    def _to_bedrock_function_format(function: FunctionSchema) -> Dict[str, Any]:
+    def _to_bedrock_function_format(function: FunctionSchema) -> dict[str, Any]:
         """Convert a function schema to Bedrock's tool format.
 
         Args:
@@ -328,7 +332,7 @@ class AWSBedrockLLMAdapter(BaseLLMAdapter[AWSBedrockLLMInvocationParams]):
             }
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert function schemas to Bedrock's function-calling format.
 
         Args:

@@ -19,8 +19,9 @@ import base64
 import copy
 import io
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, TypeAlias, Union
+from typing import Any, TypeAlias, TypeGuard, TypeVar, cast
 
 from loguru import logger
 from openai._types import NOT_GIVEN as OPEN_AI_NOT_GIVEN
@@ -35,14 +36,43 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import AudioRawFrame
 
 # "Re-export" types from OpenAI that we're using as universal context types.
-# NOTE: if universal message types need to someday diverge from OpenAI's, we
-# should consider managing our own definitions. But we should do so carefully,
-# as the OpenAI messages are somewhat of a standard and we want to continue
-# supporting them.
+# NOTE: these are aliased to OpenAI's today, but callers should treat them as
+# LLMContext's own types — independent definitions that happen to coincide
+# with OpenAI's as an implementation detail. If universal context types need
+# to someday diverge from OpenAI's, we should consider managing our own
+# definitions (but with care, since OpenAI's types are somewhat of a standard
+# and we want to continue supporting them). In the meantime, code at the
+# LLMContext/OpenAI boundary should use explicit casts rather than rely on
+# the aliasing.
 LLMStandardMessage = ChatCompletionMessageParam
 LLMContextToolChoice = ChatCompletionToolChoiceOptionParam
 NOT_GIVEN = OPEN_AI_NOT_GIVEN
 NotGiven = OpenAINotGiven
+
+
+_T = TypeVar("_T")
+
+
+def is_given(value: _T | NotGiven) -> TypeGuard[_T]:
+    """Check whether a value was explicitly provided.
+
+    Typically used when checking whether a ``NotGiven``-valued field or
+    parameter was set::
+
+        if is_given(context.tools):
+            ...
+
+    Also acts as a type guard: inside a true branch, the value is narrowed
+    to exclude ``NotGiven`` (e.g. ``ToolsSchema | NotGiven`` becomes
+    ``ToolsSchema``).
+
+    Args:
+        value: The value to check.
+
+    Returns:
+        ``True`` if *value* is anything other than ``NOT_GIVEN``.
+    """
+    return not isinstance(value, NotGiven)
 
 
 @dataclass
@@ -57,7 +87,7 @@ class LLMSpecificMessage:
     message: Any
 
 
-LLMContextMessage: TypeAlias = Union[LLMStandardMessage, LLMSpecificMessage]
+LLMContextMessage: TypeAlias = LLMStandardMessage | LLMSpecificMessage
 
 
 class LLMContext:
@@ -70,7 +100,7 @@ class LLMContext:
 
     def __init__(
         self,
-        messages: Optional[List[LLMContextMessage]] = None,
+        messages: list[LLMContextMessage] | None = None,
         tools: ToolsSchema | NotGiven = NOT_GIVEN,
         tool_choice: LLMContextToolChoice | NotGiven = NOT_GIVEN,
     ):
@@ -81,7 +111,7 @@ class LLMContext:
             tools: Available tools for the LLM to use.
             tool_choice: Tool selection strategy for the LLM.
         """
-        self._messages: List[LLMContextMessage] = messages if messages else []
+        self._messages: list[LLMContextMessage] = messages if messages else []
         self._tools: ToolsSchema | NotGiven = LLMContext._normalize_and_validate_tools(tools)
         self._tool_choice: LLMContextToolChoice | NotGiven = tool_choice
 
@@ -90,7 +120,7 @@ class LLMContext:
         *,
         role: str = "user",
         url: str,
-        text: Optional[str] = None,
+        text: str | None = None,
     ) -> LLMContextMessage:
         """Create a context message containing an image URL.
 
@@ -99,13 +129,13 @@ class LLMContext:
             url: The URL of the image.
             text: Optional text to include with the image.
         """
-        content = []
+        content: list[dict[str, Any]] = []
         if text:
             content.append({"type": "text", "text": text})
 
         content.append({"type": "image_url", "image_url": {"url": url}})
 
-        return {"role": role, "content": content}
+        return cast(LLMContextMessage, {"role": role, "content": content})
 
     @staticmethod
     async def create_image_message(
@@ -114,7 +144,7 @@ class LLMContext:
         format: str,
         size: tuple[int, int],
         image: bytes,
-        text: Optional[str] = None,
+        text: str | None = None,
     ) -> LLMContextMessage:
         """Create a context message containing an image.
 
@@ -157,7 +187,7 @@ class LLMContext:
             audio_frames: List of audio frame objects to include.
             text: Optional text to include with the audio.
         """
-        content = [{"type": "text", "text": text}]
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
 
         def encode_audio():
             sample_rate = audio_frames[0].sample_rate
@@ -184,10 +214,10 @@ class LLMContext:
             }
         )
 
-        return {"role": role, "content": content}
+        return cast(LLMContextMessage, {"role": role, "content": content})
 
     @property
-    def messages(self) -> List[LLMContextMessage]:
+    def messages(self) -> list[LLMContextMessage]:
         """Get the current messages list.
 
         NOTE: This is equivalent to calling `get_messages()` with no filter. If
@@ -201,10 +231,10 @@ class LLMContext:
 
     def get_messages(
         self,
-        llm_specific_filter: Optional[str] = None,
+        llm_specific_filter: str | None = None,
         *,
         truncate_large_values: bool = False,
-    ) -> List[LLMContextMessage]:
+    ) -> list[LLMContextMessage]:
         """Get the current messages list.
 
         Args:
@@ -242,8 +272,8 @@ class LLMContext:
 
     @staticmethod
     def _truncate_large_values_from_messages(
-        messages: List[LLMContextMessage],
-    ) -> List[LLMContextMessage]:
+        messages: list[LLMContextMessage],
+    ) -> list[LLMContextMessage]:
         """Return deep copies of messages with large values replaced by placeholders.
 
         For standard (universal-format) messages, the following known binary
@@ -265,7 +295,10 @@ class LLMContext:
                 result.append(msg_copy)
                 continue
 
-            msg = copy.deepcopy(message)
+            # The standard message variant is a union of TypedDicts; the
+            # mutations below operate on plain dicts at runtime. Treat as
+            # such for the duration of the redaction loop.
+            msg: dict[str, Any] = cast(dict[str, Any], copy.deepcopy(message))
             content = msg.get("content")
             if isinstance(content, list):
                 for item in content:
@@ -344,7 +377,7 @@ class LLMContext:
         """
         self._messages.append(message)
 
-    def add_messages(self, messages: List[LLMContextMessage]):
+    def add_messages(self, messages: list[LLMContextMessage]):
         """Add multiple messages to the context.
 
         Args:
@@ -352,7 +385,7 @@ class LLMContext:
         """
         self._messages.extend(messages)
 
-    def set_messages(self, messages: List[LLMContextMessage]):
+    def set_messages(self, messages: list[LLMContextMessage]):
         """Replace all messages in the context.
 
         Args:
@@ -361,7 +394,7 @@ class LLMContext:
         self._messages[:] = messages
 
     def transform_messages(
-        self, transform: Callable[[List[LLMContextMessage]], List[LLMContextMessage]]
+        self, transform: Callable[[list[LLMContextMessage]], list[LLMContextMessage]]
     ):
         """Transform the current messages using the provided function.
 
@@ -393,7 +426,7 @@ class LLMContext:
         format: str,
         size: tuple[int, int],
         image: bytes,
-        text: Optional[str] = None,
+        text: str | None = None,
         role: str = "user",
     ):
         """Add a message containing an image frame.

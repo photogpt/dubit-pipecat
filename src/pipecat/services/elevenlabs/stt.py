@@ -15,9 +15,11 @@ import asyncio
 import base64
 import io
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, AsyncGenerator, Optional
+from enum import StrEnum
+from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 from loguru import logger
@@ -35,7 +37,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, is_given
 from pipecat.services.stt_latency import ELEVENLABS_REALTIME_TTFS_P99, ELEVENLABS_TTFS_P99
 from pipecat.services.stt_service import SegmentedSTTService, WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -53,7 +55,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-def language_to_elevenlabs_language(language: Language) -> Optional[str]:
+def language_to_elevenlabs_language(language: Language) -> str:
     """Convert a Language enum to ElevenLabs language code.
 
     Source:
@@ -63,7 +65,9 @@ def language_to_elevenlabs_language(language: Language) -> Optional[str]:
         language: The Language enum value to convert.
 
     Returns:
-        The corresponding ElevenLabs language code, or None if not supported.
+        The corresponding service language code. If ``language`` is not in
+        the verified mapping, falls back to the full language code string and
+        logs a warning (via ``resolve_language(..., use_base_code=False)``).
     """
     LANGUAGE_MAP = {
         Language.AF: "afr",  # Afrikaans
@@ -170,7 +174,7 @@ def language_to_elevenlabs_language(language: Language) -> Optional[str]:
     return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
 
 
-class CommitStrategy(str, Enum):
+class CommitStrategy(StrEnum):
     """Commit strategies for transcript segmentation."""
 
     MANUAL = "manual"
@@ -184,9 +188,11 @@ class ElevenLabsSTTSettings(STTSettings):
     Parameters:
         tag_audio_events: Whether to include audio events like (laughter),
             (coughing) in the transcription.
+        keyterms: List of key terms or phrases to bias transcription towards.
     """
 
     tag_audio_events: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    keyterms: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 @dataclass
@@ -196,12 +202,14 @@ class ElevenLabsRealtimeSTTSettings(STTSettings):
     See ``ElevenLabsRealtimeSTTService.InputParams`` for detailed descriptions.
 
     Parameters:
+        keyterms: List of key terms or phrases to bias transcription towards.
         vad_silence_threshold_secs: Seconds of silence before VAD commits (0.3-3.0).
         vad_threshold: VAD sensitivity (0.1-0.9, lower is more sensitive).
         min_speech_duration_ms: Minimum speech duration for VAD (50-2000ms).
         min_silence_duration_ms: Minimum silence duration for VAD (50-2000ms).
     """
 
+    keyterms: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     vad_silence_threshold_secs: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     vad_threshold: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     min_speech_duration_ms: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -230,7 +238,7 @@ class ElevenLabsSTTService(SegmentedSTTService):
             tag_audio_events: Whether to include audio events like (laughter), (coughing), in the transcription.
         """
 
-        language: Optional[Language] = None
+        language: Language | None = None
         tag_audio_events: bool = True
 
     def __init__(
@@ -239,11 +247,11 @@ class ElevenLabsSTTService(SegmentedSTTService):
         api_key: str,
         aiohttp_session: aiohttp.ClientSession,
         base_url: str = "https://api.elevenlabs.io",
-        model: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = ELEVENLABS_TTFS_P99,
+        model: str | None = None,
+        sample_rate: int | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = ELEVENLABS_TTFS_P99,
         **kwargs,
     ):
         """Initialize the ElevenLabs STT service.
@@ -274,6 +282,7 @@ class ElevenLabsSTTService(SegmentedSTTService):
             model="scribe_v2",
             language=Language.EN,
             tag_audio_events=None,
+            keyterms=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -312,7 +321,7 @@ class ElevenLabsSTTService(SegmentedSTTService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to ElevenLabs service-specific language code.
 
         Args:
@@ -352,6 +361,10 @@ class ElevenLabsSTTService(SegmentedSTTService):
         data.add_field("language_code", self._settings.language)
         if self._settings.tag_audio_events is not None:
             data.add_field("tag_audio_events", str(self._settings.tag_audio_events).lower())
+        keyterms = self._settings.keyterms
+        if is_given(keyterms) and keyterms is not None:
+            for keyterm in keyterms:
+                data.add_field("keyterms", keyterm)
 
         async with self._session.post(url, data=data, headers=headers) as response:
             if response.status != 200:
@@ -364,12 +377,12 @@ class ElevenLabsSTTService(SegmentedSTTService):
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[str] = None
+        self, transcript: str, is_final: bool, language: str | None = None
     ):
         """Handle a transcription result with tracing."""
         await self.stop_processing_metrics()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Transcribe an audio segment using ElevenLabs' STT API.
 
         Args:
@@ -474,12 +487,12 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
             include_language_detection: Whether to include language detection in transcripts.
         """
 
-        language_code: Optional[str] = None
+        language_code: str | None = None
         commit_strategy: CommitStrategy = CommitStrategy.MANUAL
-        vad_silence_threshold_secs: Optional[float] = None
-        vad_threshold: Optional[float] = None
-        min_speech_duration_ms: Optional[int] = None
-        min_silence_duration_ms: Optional[int] = None
+        vad_silence_threshold_secs: float | None = None
+        vad_threshold: float | None = None
+        min_speech_duration_ms: int | None = None
+        min_silence_duration_ms: int | None = None
         include_timestamps: bool = False
         enable_logging: bool = False
         include_language_detection: bool = False
@@ -490,14 +503,14 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         api_key: str,
         base_url: str = "api.elevenlabs.io",
         commit_strategy: CommitStrategy = CommitStrategy.MANUAL,
-        model: Optional[str] = None,
-        sample_rate: Optional[int] = None,
+        model: str | None = None,
+        sample_rate: int | None = None,
         include_timestamps: bool = False,
         enable_logging: bool = False,
         include_language_detection: bool = False,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = ELEVENLABS_REALTIME_TTFS_P99,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = ELEVENLABS_REALTIME_TTFS_P99,
         **kwargs,
     ):
         """Initialize the ElevenLabs Realtime STT service.
@@ -536,6 +549,7 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
             vad_threshold=None,
             min_speech_duration_ms=None,
             min_silence_duration_ms=None,
+            keyterms=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -673,7 +687,7 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
                     except Exception as e:
                         logger.warning(f"Failed to send commit: {e}")
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Process audio data for speech-to-text transcription.
 
         Args:
@@ -738,6 +752,10 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
         Args:
             silence: Silent 16-bit mono PCM audio bytes.
         """
+        if (
+            self._websocket is None
+        ):  # should never happen — caller should gate on _is_keepalive_ready()
+            return
         audio_base64 = base64.b64encode(silence).decode("utf-8")
         message = {
             "message_type": "input_audio_chunk",
@@ -763,6 +781,11 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
 
             params.append(f"audio_format={self._audio_format}")
             params.append(f"commit_strategy={self._commit_strategy.value}")
+
+            keyterms = self._settings.keyterms
+            if is_given(keyterms) and keyterms is not None:
+                for keyterm in keyterms:
+                    params.append(urlencode({"keyterms": keyterm}))
 
             # Add optional parameters
             if self._include_timestamps:
@@ -908,7 +931,7 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[str] = None
+        self, transcript: str, is_final: bool, language: str | None = None
     ):
         """Handle a transcription result with tracing."""
         pass

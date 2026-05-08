@@ -16,8 +16,9 @@ Features:
     - Model-specific sample rates: mars-pro (48kHz), mars-flash (22.05kHz)
 """
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any
 
 from camb import StreamTtsOutputConfiguration
 from camb.client import AsyncCambAI
@@ -30,27 +31,30 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
 
 # Model-specific sample rates
-MODEL_SAMPLE_RATES: Dict[str, int] = {
+MODEL_SAMPLE_RATES: dict[str, int] = {
     "mars-flash": 22050,  # 22.05kHz
     "mars-pro": 48000,  # 48kHz
     "mars-instruct": 22050,  # 22.05kHz
 }
 
 
-def language_to_camb_language(language: Language) -> Optional[str]:
+def language_to_camb_language(language: Language) -> str:
     """Convert a Pipecat Language enum to Camb.ai language code.
 
     Args:
         language: The Language enum value to convert.
 
     Returns:
-        The corresponding Camb.ai language code (BCP-47 format), or None if not supported.
+        The corresponding Camb.ai language code (BCP-47 format). If
+        ``language`` is not in the verified mapping, falls back to the base
+        language code (e.g., ``en`` from ``en-US``) and logs a warning (via
+        ``resolve_language(..., use_base_code=True)``).
     """
     LANGUAGE_MAP = {
         Language.EN: "en-us",
@@ -193,8 +197,8 @@ class CambTTSService(TTSService):
                 Ignored for other models. Max 1000 characters.
         """
 
-        language: Optional[Language] = Language.EN
-        user_instructions: Optional[str] = Field(
+        language: Language | None = Language.EN
+        user_instructions: str | None = Field(
             default=None,
             max_length=1000,
             description="Custom instructions for mars-instruct model only. "
@@ -205,12 +209,12 @@ class CambTTSService(TTSService):
         self,
         *,
         api_key: str,
-        voice_id: Optional[int] = None,
-        model: Optional[str] = None,
+        voice_id: int | None = None,
+        model: str | None = None,
         timeout: float = 60.0,
-        sample_rate: Optional[int] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        sample_rate: int | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Camb.ai TTS service.
@@ -269,8 +273,8 @@ class CambTTSService(TTSService):
             default_settings.apply_update(settings)
 
         # Warn if sample rate doesn't match model's supported rate
-        _model = default_settings.model
-        if sample_rate and sample_rate != MODEL_SAMPLE_RATES.get(_model):
+        _model = assert_given(default_settings.model)
+        if sample_rate and _model is not None and sample_rate != MODEL_SAMPLE_RATES.get(_model):
             logger.warning(
                 f"Camb.ai's {_model} model only supports {MODEL_SAMPLE_RATES.get(_model)}Hz "
                 f"sample rate. Current rate of {sample_rate}Hz may cause issues."
@@ -297,7 +301,7 @@ class CambTTSService(TTSService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Camb.ai language format.
 
         Args:
@@ -320,7 +324,8 @@ class CambTTSService(TTSService):
 
         # Use model-specific sample rate if not explicitly specified
         if not self._init_sample_rate:
-            self._sample_rate = MODEL_SAMPLE_RATES.get(self._settings.model, 22050)
+            model = assert_given(self._settings.model)
+            self._sample_rate = MODEL_SAMPLE_RATES.get(model, 22050) if model is not None else 22050
 
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
@@ -342,7 +347,7 @@ class CambTTSService(TTSService):
 
         try:
             # Build SDK parameters
-            tts_kwargs: Dict[str, Any] = {
+            tts_kwargs: dict[str, Any] = {
                 "text": text,
                 "voice_id": self._settings.voice,
                 "language": self._settings.language,

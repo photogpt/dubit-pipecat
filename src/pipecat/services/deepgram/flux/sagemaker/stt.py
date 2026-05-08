@@ -9,8 +9,8 @@
 import asyncio
 import json
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional
 
 from loguru import logger
 
@@ -23,7 +23,6 @@ from pipecat.services.deepgram.flux.base import (
     DeepgramFluxSTTBase,
     DeepgramFluxSTTSettings,
 )
-from pipecat.transcriptions.language import Language
 
 
 @dataclass
@@ -86,11 +85,12 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
         endpoint_name: str,
         region: str,
         encoding: str = "linear16",
-        sample_rate: Optional[int] = None,
-        mip_opt_out: Optional[bool] = None,
-        tag: Optional[list] = None,
+        sample_rate: int | None = None,
+        mip_opt_out: bool | None = None,
+        tag: list | None = None,
         should_interrupt: bool = True,
-        settings: Optional[Settings] = None,
+        watchdog_min_timeout: float = 0.5,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Deepgram Flux SageMaker STT service.
@@ -106,18 +106,21 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
             tag: Tags to label requests for identification during usage reporting.
             should_interrupt: Whether to interrupt the bot when Flux detects that
                 the user is speaking. Defaults to True.
+            watchdog_min_timeout: Minimum silence duration in seconds before the watchdog
+                sends silence to prevent dangling turns. Defaults to 0.5.
             settings: Runtime-updatable settings.
             **kwargs: Additional arguments passed to the parent STTService.
         """
         # Initialize default settings
         default_settings = self.Settings(
             model="flux-general-en",
-            language=Language.EN,
+            language=None,
             eager_eot_threshold=None,
             eot_threshold=None,
             eot_timeout_ms=None,
             keyterm=[],
             min_confidence=None,
+            language_hints=None,
         )
 
         # Apply settings delta
@@ -129,6 +132,7 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
             mip_opt_out=mip_opt_out,
             tag=tag,
             should_interrupt=should_interrupt,
+            watchdog_min_timeout=watchdog_min_timeout,
             settings=default_settings,
             sample_rate=sample_rate,
             **kwargs,
@@ -137,17 +141,25 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
         self._endpoint_name = endpoint_name
         self._region = region
 
-        self._client: Optional[SageMakerBidiClient] = None
-        self._response_task: Optional[asyncio.Task] = None
+        self._client: SageMakerBidiClient | None = None
+        self._response_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Transport interface implementation
     # ------------------------------------------------------------------
 
     async def _transport_send_audio(self, audio: bytes):
+        if (
+            self._client is None
+        ):  # should never happen — caller should gate on _transport_is_active()
+            return
         await self._client.send_audio_chunk(audio)
 
     async def _transport_send_json(self, message: dict):
+        if (
+            self._client is None
+        ):  # should never happen — caller should gate on _transport_is_active()
+            return
         await self._client.send_json(message)
 
     def _transport_is_active(self) -> bool:
@@ -222,7 +234,7 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
     # Audio sending and response receiving
     # ------------------------------------------------------------------
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to Deepgram Flux for transcription.
 
         Args:
@@ -237,6 +249,7 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
         if self._client and self._client.is_active:
             try:
                 self._last_stt_time = time.monotonic()
+                self._last_audio_chunk_duration = len(audio) / (self.sample_rate * 2)
                 await self._client.send_audio_chunk(audio)
             except Exception as e:
                 yield ErrorFrame(error=f"Unknown error occurred: {e}")

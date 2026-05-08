@@ -14,7 +14,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import httpx
 from loguru import logger
@@ -39,11 +39,12 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import NOT_GIVEN as _NOT_GIVEN
-from pipecat.services.settings import LLMSettings, _NotGiven, is_given
+from pipecat.services.settings import LLMSettings, _NotGiven, assert_given, is_given
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 try:
     from anthropic import NOT_GIVEN, APITimeoutError, AsyncAnthropic
+    from anthropic import NotGiven as AnthropicNotGiven
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Anthropic, you need to `pip install pipecat-ai[anthropic]`.")
@@ -66,7 +67,7 @@ class AnthropicThinkingConfig(BaseModel):
 
     # No client-side validation on budget_tokens — we let the server
     # enforce the rules so we stay forward-compatible if they change.
-    budget_tokens: Optional[int] = None
+    budget_tokens: int | None = None
 
 
 @dataclass
@@ -79,7 +80,15 @@ class AnthropicLLMSettings(LLMSettings):
     """
 
     enable_prompt_caching: bool | _NotGiven = field(default_factory=lambda: _NOT_GIVEN)
-    thinking: Union["AnthropicLLMService.ThinkingConfig", _NotGiven] = field(
+    # Override inherited LLMSettings fields to also accept anthropic's NotGiven
+    # sentinel. The service stores anthropic's NOT_GIVEN in these fields so
+    # they can be passed through unchanged to the AsyncAnthropic client.
+    temperature: float | None | _NotGiven | AnthropicNotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
+    top_k: int | None | _NotGiven | AnthropicNotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    top_p: float | None | _NotGiven | AnthropicNotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    thinking: Union["AnthropicLLMService.ThinkingConfig", _NotGiven, AnthropicNotGiven] = field(
         default_factory=lambda: _NOT_GIVEN
     )
 
@@ -96,7 +105,7 @@ class AnthropicLLMSettings(LLMSettings):
         return instance
 
 
-class AnthropicLLMService(LLMService):
+class AnthropicLLMService(LLMService[AnthropicLLMAdapter]):
     """LLM service for Anthropic's Claude models.
 
     Provides inference capabilities with Claude models including support for
@@ -133,26 +142,26 @@ class AnthropicLLMService(LLMService):
             extra: Additional parameters to pass to the API.
         """
 
-        enable_prompt_caching: Optional[bool] = None
-        max_tokens: Optional[int] = Field(default_factory=lambda: 4096, ge=1)
-        temperature: Optional[float] = Field(default_factory=lambda: NOT_GIVEN, ge=0.0, le=1.0)
-        top_k: Optional[int] = Field(default_factory=lambda: NOT_GIVEN, ge=0)
-        top_p: Optional[float] = Field(default_factory=lambda: NOT_GIVEN, ge=0.0, le=1.0)
+        enable_prompt_caching: bool | None = None
+        max_tokens: int | None = Field(default_factory=lambda: 4096, ge=1)
+        temperature: float | None = Field(default_factory=lambda: NOT_GIVEN, ge=0.0, le=1.0)
+        top_k: int | None = Field(default_factory=lambda: NOT_GIVEN, ge=0)
+        top_p: float | None = Field(default_factory=lambda: NOT_GIVEN, ge=0.0, le=1.0)
         thinking: Optional["AnthropicLLMService.ThinkingConfig"] = Field(
             default_factory=lambda: NOT_GIVEN
         )
-        extra: Optional[Dict[str, Any]] = Field(default_factory=dict)
+        extra: dict[str, Any] | None = Field(default_factory=dict)
 
     def __init__(
         self,
         *,
         api_key: str,
-        model: Optional[str] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        model: str | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         client=None,
-        retry_timeout_secs: Optional[float] = 5.0,
-        retry_on_timeout: Optional[bool] = False,
+        retry_timeout_secs: float | None = 5.0,
+        retry_on_timeout: bool | None = False,
         **kwargs,
     ):
         """Initialize the Anthropic LLM service.
@@ -251,7 +260,7 @@ class AnthropicLLMService(LLMService):
                     api_call(**params), timeout=self._retry_timeout_secs
                 )
                 return response
-            except (APITimeoutError, asyncio.TimeoutError):
+            except (TimeoutError, APITimeoutError):
                 # Retry, this time without a timeout so we get a response
                 logger.debug(f"{self}: Retrying message creation due to timeout")
                 response = await api_call(**params)
@@ -263,9 +272,9 @@ class AnthropicLLMService(LLMService):
     async def run_inference(
         self,
         context: LLMContext,
-        max_tokens: Optional[int] = None,
-        system_instruction: Optional[str] = None,
-    ) -> Optional[str]:
+        max_tokens: int | None = None,
+        system_instruction: str | None = None,
+    ) -> str | None:
         """Run a one-shot, out-of-band (i.e. out-of-pipeline) inference with the given LLM context.
 
         Args:
@@ -281,11 +290,13 @@ class AnthropicLLMService(LLMService):
         messages = []
         system = NOT_GIVEN
         tools = []
-        effective_instruction = system_instruction or self._settings.system_instruction
-        adapter: AnthropicLLMAdapter = self.get_llm_adapter()
+        effective_instruction = system_instruction or assert_given(
+            self._settings.system_instruction
+        )
+        adapter = self.get_llm_adapter()
         invocation_params = adapter.get_llm_invocation_params(
             context,
-            enable_prompt_caching=self._settings.enable_prompt_caching,
+            enable_prompt_caching=assert_given(self._settings.enable_prompt_caching),
             system_instruction=effective_instruction,
         )
         messages = invocation_params["messages"]
@@ -305,8 +316,9 @@ class AnthropicLLMService(LLMService):
             "tools": tools,
             "betas": ["interleaved-thinking-2025-05-14"],
         }
-        if self._settings.thinking:
-            params["thinking"] = self._settings.thinking.model_dump(exclude_unset=True)
+        thinking = assert_given(self._settings.thinking)
+        if thinking:
+            params["thinking"] = thinking.model_dump(exclude_unset=True)
 
         params.update(self._settings.extra)
 
@@ -316,11 +328,11 @@ class AnthropicLLMService(LLMService):
         return next((block.text for block in response.content if hasattr(block, "text")), None)
 
     def _get_llm_invocation_params(self, context: LLMContext) -> AnthropicLLMInvocationParams:
-        adapter: AnthropicLLMAdapter = self.get_llm_adapter()
-        params: AnthropicLLMInvocationParams = adapter.get_llm_invocation_params(
+        adapter = self.get_llm_adapter()
+        params = adapter.get_llm_invocation_params(
             context,
-            enable_prompt_caching=self._settings.enable_prompt_caching,
-            system_instruction=self._settings.system_instruction,
+            enable_prompt_caching=assert_given(self._settings.enable_prompt_caching),
+            system_instruction=assert_given(self._settings.system_instruction),
         )
         return params
 
@@ -345,9 +357,7 @@ class AnthropicLLMService(LLMService):
 
             adapter = self.get_llm_adapter()
             messages_for_logging = adapter.get_messages_for_logging(context)
-            logger.debug(
-                f"{self}: Generating chat from context [{params_from_context['system']}] | {messages_for_logging}"
-            )
+            logger.debug(f"{self}: Generating chat from context {messages_for_logging}")
 
             await self.start_ttfb_metrics()
 
@@ -361,8 +371,9 @@ class AnthropicLLMService(LLMService):
             }
 
             # Add thinking parameter if set
-            if self._settings.thinking:
-                params["thinking"] = self._settings.thinking.model_dump(exclude_unset=True)
+            thinking = assert_given(self._settings.thinking)
+            if thinking:
+                params["thinking"] = thinking.model_dump(exclude_unset=True)
 
             # Messages, system, tools
             params.update(params_from_context)

@@ -6,10 +6,9 @@
 
 """OpenAI LLM service implementation with context aggregators."""
 
-from typing import Optional
-
 from openai import NOT_GIVEN
 
+from pipecat.adapters.services.open_ai_adapter import is_given
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregatorParams,
@@ -32,10 +31,10 @@ class OpenAILLMService(BaseOpenAILLMService):
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
-        service_tier: Optional[str] = None,
-        params: Optional[BaseOpenAILLMService.InputParams] = None,
-        settings: Optional[Settings] = None,
+        model: str | None = None,
+        service_tier: str | None = None,
+        params: BaseOpenAILLMService.InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize OpenAI LLM service.
@@ -79,7 +78,7 @@ class OpenAILLMService(BaseOpenAILLMService):
             default_settings.model = model
 
         # Handle service_tier from deprecated params
-        if params is not None and not settings and params.service_tier is not NOT_GIVEN:
+        if params is not None and not settings and is_given(params.service_tier):
             service_tier = service_tier or params.service_tier
 
         # 3. Apply params overrides — only if settings not provided
@@ -106,8 +105,8 @@ class OpenAILLMService(BaseOpenAILLMService):
         self,
         context: LLMContext,
         *,
-        user_params: Optional[LLMUserAggregatorParams] = None,
-        assistant_params: Optional[LLMAssistantAggregatorParams] = None,
+        user_params: LLMUserAggregatorParams | None = None,
+        assistant_params: LLMAssistantAggregatorParams | None = None,
         aggregator_type: str = "pipecat",
     ) -> LLMContextAggregatorPair:
         """Create a universal context aggregator pair.

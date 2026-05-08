@@ -8,7 +8,7 @@
 
 import json
 import time
-from typing import AsyncGenerator, Optional
+from collections.abc import AsyncGenerator
 
 from loguru import logger
 from pydantic import BaseModel
@@ -24,7 +24,6 @@ from pipecat.services.deepgram.flux.base import (
     FluxMessageType,
 )
 from pipecat.services.websocket_service import WebsocketService
-from pipecat.transcriptions.language import Language
 
 try:
     from websockets.asyncio.client import connect as websocket_connect
@@ -49,6 +48,12 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
     Provides real-time speech recognition using Deepgram's WebSocket API with Flux capabilities.
     Supports configurable models, VAD events, and various audio processing options
     including advanced turn detection and EagerEndOfTurn events for improved conversational AI performance.
+
+    For multilingual use, set ``model="flux-general-multi"`` and pass
+    ``language_hints`` to bias detection toward specific languages. Hints can
+    be updated mid-stream via ``STTUpdateSettingsFrame`` (e.g. to implement a
+    detect-then-lock flow). ``TranscriptionFrame.language`` reflects whichever
+    language Flux detected for each turn.
 
     Event handlers available (in addition to base events):
 
@@ -90,27 +95,28 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
             min_confidence: Optional. Minimum confidence required confidence to create a TranscriptionFrame
         """
 
-        eager_eot_threshold: Optional[float] = None
-        eot_threshold: Optional[float] = None
-        eot_timeout_ms: Optional[int] = None
+        eager_eot_threshold: float | None = None
+        eot_threshold: float | None = None
+        eot_timeout_ms: int | None = None
         keyterm: list = []
-        mip_opt_out: Optional[bool] = None
+        mip_opt_out: bool | None = None
         tag: list = []
-        min_confidence: Optional[float] = None  # New parameter
+        min_confidence: float | None = None  # New parameter
 
     def __init__(
         self,
         *,
         api_key: str,
         url: str = "wss://api.deepgram.com/v2/listen",
-        sample_rate: Optional[int] = None,
-        mip_opt_out: Optional[bool] = None,
-        model: Optional[str] = None,
+        sample_rate: int | None = None,
+        mip_opt_out: bool | None = None,
+        model: str | None = None,
         flux_encoding: str = "linear16",
-        tag: Optional[list] = None,
-        params: Optional[InputParams] = None,
+        tag: list | None = None,
+        params: InputParams | None = None,
         should_interrupt: bool = True,
-        settings: Optional[Settings] = None,
+        watchdog_min_timeout: float = 0.5,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Deepgram Flux STT service.
@@ -135,6 +141,8 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
                     Use ``settings=DeepgramFluxSTTService.Settings(...)`` instead.
 
             should_interrupt: Determine whether the bot should be interrupted when Flux detects that the user is speaking.
+            watchdog_min_timeout: Minimum silence duration in seconds before the watchdog
+                sends silence to prevent dangling turns. Defaults to 0.5.
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
             **kwargs: Additional arguments passed to the parent classes.
@@ -156,6 +164,16 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
                         tag=["production", "voice-agent"],
                     ),
                 )
+
+            Multilingual usage with language hints::
+
+                stt = DeepgramFluxSTTService(
+                    api_key="your-api-key",
+                    settings=DeepgramFluxSTTService.Settings(
+                        model="flux-general-multi",
+                        language_hints=[Language.EN, Language.ES],
+                    ),
+                )
         """
         # Note: For DeepgramFluxSTTService, differently from other processes, we need to create
         # the _receive_task inside _connect_websocket, because the websocket should only be
@@ -171,12 +189,13 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
             model="flux-general-en",
-            language=Language.EN,
+            language=None,
             eager_eot_threshold=None,
             eot_threshold=None,
             eot_timeout_ms=None,
             keyterm=[],
             min_confidence=None,
+            language_hints=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -208,6 +227,7 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
             mip_opt_out=mip_opt_out,
             tag=tag,
             should_interrupt=should_interrupt,
+            watchdog_min_timeout=watchdog_min_timeout,
             settings=default_settings,
             sample_rate=sample_rate,
             **kwargs,
@@ -224,9 +244,17 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
     # ------------------------------------------------------------------
 
     async def _transport_send_audio(self, audio: bytes):
+        if (
+            self._websocket is None
+        ):  # should never happen — caller should gate on _transport_is_active()
+            return
         await self._websocket.send(audio)
 
     async def _transport_send_json(self, message: dict):
+        if (
+            self._websocket is None
+        ):  # should never happen — caller should gate on _transport_is_active()
+            return
         await self._websocket.send(json.dumps(message))
 
     def _transport_is_active(self) -> bool:
@@ -275,14 +303,19 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
 
             self._connection_established_event.clear()
             self._user_is_speaking = False
-            self._websocket = await websocket_connect(
+            # `_connect` sets `_websocket_url` before calling us; the assert
+            # narrows for pyright.
+            assert self._websocket_url is not None
+            websocket = await websocket_connect(
                 self._websocket_url,
                 additional_headers={"Authorization": f"Token {self._api_key}"},
             )
+            self._websocket = websocket
 
-            headers = {
-                k: v for k, v in self._websocket.response.headers.items() if k.startswith("dg-")
-            }
+            # `response` is populated after the handshake completes (which it
+            # has, since `websocket_connect` already returned).
+            response_headers = websocket.response.headers if websocket.response else {}
+            headers = {k: v for k, v in response_headers.items() if k.startswith("dg-")}
             logger.debug(f'{self}: Websocket connection initialized: {{"headers": {headers}}}')
 
             # Creating the receiver task
@@ -338,7 +371,7 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
     # Audio sending and receiving
     # ------------------------------------------------------------------
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to Deepgram Flux for transcription.
 
         Transmits raw audio bytes to the Deepgram Flux API for real-time speech
@@ -361,6 +394,7 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
 
         try:
             self._last_stt_time = time.monotonic()
+            self._last_audio_chunk_duration = len(audio) / (self.sample_rate * 2)
             await self.send_with_retry(audio, self._report_error)
         except Exception as e:
             yield ErrorFrame(error=f"Unknown error occurred: {e}")

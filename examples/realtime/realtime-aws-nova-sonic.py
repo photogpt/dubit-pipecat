@@ -30,6 +30,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.aws.nova_sonic.llm import AWSNovaSonicLLMService
+from pipecat.services.aws.nova_sonic.session_continuation import SessionContinuationParams
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
@@ -116,8 +117,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # Create the AWS Nova Sonic LLM service
     llm = AWSNovaSonicLLMService(
-        secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
         # as of 2025-12-09, these are the supported regions:
         # - Nova 2 Sonic (the default model):
         #   - us-east-1
@@ -126,11 +127,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         # - Nova Sonic (the older model):
         #   - us-east-1
         #   - ap-northeast-1
-        region=os.getenv("AWS_REGION"),
+        region=os.environ["AWS_REGION"],
         session_token=os.getenv("AWS_SESSION_TOKEN"),
         settings=AWSNovaSonicLLMService.Settings(
             voice="tiffany",
             system_instruction=system_instruction,
+        ),
+        # Session continuation is enabled by default, allowing seamless
+        # conversations longer than the AWS ~8-minute session limit.
+        # The service rotates sessions in the background with no
+        # user-perceptible interruption. You can tune the threshold or
+        # disable it with: session_continuation=SessionContinuationParams(enabled=False)
+        session_continuation=SessionContinuationParams(
+            # When to start preparing the next session (default: 360 = 6 min).
+            # Lower this (e.g. 20) to see a handoff happen quickly during testing.
+            transition_threshold_seconds=360,
         ),
         # you could choose to pass tools here rather than via context
         # tools=tools

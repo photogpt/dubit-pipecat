@@ -9,7 +9,7 @@
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict, TypeGuard, TypeVar, cast
 
 from anthropic import NOT_GIVEN, NotGiven
 from anthropic.types.message_param import MessageParam
@@ -26,13 +26,36 @@ from pipecat.processors.aggregators.llm_context import (
     LLMStandardMessage,
 )
 
+_T = TypeVar("_T")
+
+
+def is_given(value: _T | NotGiven) -> TypeGuard[_T]:
+    """Check whether a value was explicitly provided.
+
+    Typically used when checking whether a parameter or field typed with
+    Anthropic's ``NotGiven`` was set::
+
+        if is_given(system):
+            ...
+
+    Also acts as a type guard: inside a true branch, the value is narrowed
+    to exclude ``NotGiven`` (e.g. ``str | NotGiven`` becomes ``str``).
+
+    Args:
+        value: The value to check.
+
+    Returns:
+        ``True`` if *value* is anything other than ``NOT_GIVEN``.
+    """
+    return not isinstance(value, NotGiven)
+
 
 class AnthropicLLMInvocationParams(TypedDict):
     """Context-based parameters for invoking Anthropic's LLM API."""
 
     system: str | NotGiven
-    messages: List[MessageParam]
-    tools: List[ToolUnionParam]
+    messages: list[MessageParam]
+    tools: list[ToolUnionParam]
 
 
 class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
@@ -51,7 +74,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
         self,
         context: LLMContext,
         enable_prompt_caching: bool,
-        system_instruction: Optional[str] = None,
+        system_instruction: str | None = None,
     ) -> AnthropicLLMInvocationParams:
         """Get Anthropic-specific LLM invocation parameters from a universal LLM context.
 
@@ -68,7 +91,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             self.get_messages(context), system_instruction=system_instruction
         )
         system = self._resolve_system_instruction(
-            converted.system if converted.system is not NOT_GIVEN else None,
+            converted.system if is_given(converted.system) else None,
             system_instruction,
             discard_context_system=True,
         )
@@ -83,7 +106,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             "tools": self.from_standard_tools(context.tools) or [],
         }
 
-    def get_messages_for_logging(self, context: LLMContext) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context: LLMContext) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about Anthropic.
 
         Removes or truncates sensitive data like image content for safe logging.
@@ -98,16 +121,20 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
         messages = self._from_universal_context_messages(self.get_messages(context)).messages
 
         # Sanitize messages for logging
-        messages_for_logging = []
+        messages_for_logging: list[dict[str, Any]] = []
         for message in messages:
-            msg = copy.deepcopy(message)
-            if "content" in msg:
-                if isinstance(msg["content"], list):
-                    for item in msg["content"]:
-                        if item["type"] == "image":
-                            item["source"]["data"] = "..."
-                        if item["type"] == "thinking" and item.get("signature"):
-                            item["signature"] = "..."
+            msg: dict[str, Any] = copy.deepcopy(dict(message))
+            content = msg.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "image":
+                        source = item.get("source")
+                        if isinstance(source, dict):
+                            source["data"] = "..."
+                    if item.get("type") == "thinking" and item.get("signature"):
+                        item["signature"] = "..."
             messages_for_logging.append(msg)
         return messages_for_logging
 
@@ -115,14 +142,14 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
     class ConvertedMessages:
         """Container for Anthropic-formatted messages converted from universal context."""
 
-        messages: List[MessageParam]
+        messages: list[MessageParam]
         system: str | NotGiven
 
     def _from_universal_context_messages(
         self,
-        universal_context_messages: List[LLMContextMessage],
+        universal_context_messages: list[LLMContextMessage],
         *,
-        system_instruction: Optional[str] = None,
+        system_instruction: str | None = None,
     ) -> ConvertedMessages:
         system = NOT_GIVEN
 
@@ -162,8 +189,13 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
                     ]
                 if isinstance(next_message["content"], str):
                     next_message["content"] = [{"type": "text", "text": next_message["content"]}]
-                # Concatenate the content
-                current_message["content"].extend(next_message["content"])
+                # Concatenate the content. MessageParam types content as
+                # `str | Iterable[...]`, but this codebase assumes it's
+                # either a str or a list. The str case is handled above, so
+                # we assume that both are lists here.
+                cast(list[Any], current_message["content"]).extend(
+                    cast(list[Any], next_message["content"])
+                )
                 # Remove the next message from the list
                 messages.pop(i + 1)
             else:
@@ -216,7 +248,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             }
 
         # Fall back to assuming that the message is already in Anthropic format
-        return copy.deepcopy(message.message)
+        return cast(MessageParam, copy.deepcopy(message.message))
 
     def _from_standard_message(self, message: LLMStandardMessage) -> MessageParam:
         """Convert standard universal context message to Anthropic format.
@@ -257,20 +289,26 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
                     ]
                 }
         """
-        message = copy.deepcopy(message)
-        if message["role"] == "tool":
-            return {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": message["tool_call_id"],
-                        "content": message["content"],
-                    },
-                ],
-            }
-        if message.get("tool_calls"):
-            tc = message["tool_calls"]
+        # ChatCompletionMessageParam (input) and MessageParam (output) are
+        # different TypedDicts — work with the message as a plain dict for the
+        # transformations below and cast back to MessageParam at return sites.
+        msg = cast(dict[str, Any], copy.deepcopy(message))
+        if msg["role"] == "tool":
+            return cast(
+                MessageParam,
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": msg["tool_call_id"],
+                            "content": msg["content"],
+                        },
+                    ],
+                },
+            )
+        if msg.get("tool_calls"):
+            tc = msg["tool_calls"]
             ret = {"role": "assistant", "content": []}
             for tool_call in tc:
                 function = tool_call["function"]
@@ -282,8 +320,8 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
                     "input": arguments,
                 }
                 ret["content"].append(new_tool_use)
-            return ret
-        content = message.get("content")
+            return cast(MessageParam, ret)
+        content = msg.get("content")
         if isinstance(content, str):
             # fix empty text
             if content == "":
@@ -331,9 +369,9 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
                     image_item = content.pop(img_idx)
                     content.insert(first_txt_idx, image_item)
 
-        return message
+        return cast(MessageParam, msg)
 
-    def _with_cache_control_markers(self, messages: List[MessageParam]) -> List[MessageParam]:
+    def _with_cache_control_markers(self, messages: list[MessageParam]) -> list[MessageParam]:
         """Add cache control markers to messages for prompt caching.
 
         Args:
@@ -346,7 +384,16 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
         def add_cache_control_marker(message: MessageParam):
             if isinstance(message["content"], str):
                 message["content"] = [{"type": "text", "text": message["content"]}]
-            message["content"][-1]["cache_control"] = {"type": "ephemeral"}
+            # Assumptions on the next line:
+            #   - content is a list (str case handled above; this codebase only
+            #     ever constructs content as a str or a list)
+            #   - the list is non-empty (guaranteed by the empty-content
+            #     replacement in `_from_universal_context_messages`)
+            #   - the last item is a dict. The standard-message path enforces
+            #     this via TypedDicts (which are dicts at runtime); the
+            #     LLMSpecificMessage passthrough doesn't, but in practice
+            #     callers use dicts.
+            cast(list[Any], message["content"])[-1]["cache_control"] = {"type": "ephemeral"}
 
         try:
             # Add cache control markers to the most recent two user messages.
@@ -381,7 +428,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             return messages_with_markers
 
     @staticmethod
-    def _to_anthropic_function_format(function: FunctionSchema) -> Dict[str, Any]:
+    def _to_anthropic_function_format(function: FunctionSchema) -> dict[str, Any]:
         """Convert a single function schema to Anthropic's format.
 
         Args:
@@ -400,7 +447,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             },
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert function schemas to Anthropic's function-calling format.
 
         Args:

@@ -12,7 +12,6 @@ and context aggregation functionality.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 
@@ -48,8 +47,8 @@ class GrokLLMService(OpenAILLMService):
         *,
         api_key: str,
         base_url: str = "https://api.x.ai/v1",
-        model: Optional[str] = None,
-        settings: Optional[Settings] = None,
+        model: str | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the GrokLLMService with API key and model.
@@ -57,7 +56,7 @@ class GrokLLMService(OpenAILLMService):
         Args:
             api_key: The API key for accessing Grok's API.
             base_url: The base URL for Grok API. Defaults to "https://api.x.ai/v1".
-            model: The model identifier to use. Defaults to "grok-3".
+            model: The model identifier to use. Defaults to "grok-4.20-non-reasoning".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GrokLLMService.Settings(model=...)`` instead.
@@ -68,7 +67,7 @@ class GrokLLMService(OpenAILLMService):
         """
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model="grok-3",
+            model="grok-4.20-non-reasoning",
         )
 
         # 2. Apply direct init arg overrides (deprecated)

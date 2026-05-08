@@ -16,8 +16,9 @@ import os
 # Suppress gRPC fork warnings
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from loguru import logger
 from PIL import Image
@@ -26,10 +27,10 @@ from pydantic import BaseModel, Field
 from pipecat.frames.frames import ErrorFrame, Frame, URLImageRawFrame
 from pipecat.services.google.utils import update_google_client_http_options
 from pipecat.services.image_service import ImageGenService
-from pipecat.services.settings import NOT_GIVEN, ImageGenSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, ImageGenSettings, _NotGiven, assert_given
 
 try:
-    from google import genai
+    import google.genai as genai
     from google.genai import types
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
@@ -76,15 +77,15 @@ class GoogleImageGenService(ImageGenService):
 
         number_of_images: int = Field(default=1, ge=1, le=8)
         model: str = Field(default="imagen-4.0-generate-001")
-        negative_prompt: Optional[str] = Field(default=None)
+        negative_prompt: str | None = Field(default=None)
 
     def __init__(
         self,
         *,
         api_key: str,
-        params: Optional[InputParams] = None,
-        http_options: Optional[Any] = None,
-        settings: Optional[Settings] = None,
+        params: InputParams | None = None,
+        http_options: Any | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the GoogleImageGenService with API key and parameters.
@@ -152,12 +153,16 @@ class GoogleImageGenService(ImageGenService):
         await self.start_ttfb_metrics()
 
         try:
+            model = assert_given(self._settings.model)
+            if model is None:
+                yield ErrorFrame("Google image generation model must be specified")
+                return
             response = await self._client.aio.models.generate_images(
-                model=self._settings.model,
+                model=model,
                 prompt=prompt,
                 config=types.GenerateImagesConfig(
-                    number_of_images=self._settings.number_of_images,
-                    negative_prompt=self._settings.negative_prompt,
+                    number_of_images=assert_given(self._settings.number_of_images),
+                    negative_prompt=assert_given(self._settings.negative_prompt),
                 ),
             )
             await self.stop_ttfb_metrics()
@@ -168,8 +173,9 @@ class GoogleImageGenService(ImageGenService):
 
             for img_response in response.generated_images:
                 # Google returns the image data directly
-                image_bytes = img_response.image.image_bytes
-                image = Image.open(io.BytesIO(image_bytes))
+                if img_response.image is None or img_response.image.image_bytes is None:
+                    continue
+                image = Image.open(io.BytesIO(img_response.image.image_bytes))
 
                 frame = URLImageRawFrame(
                     url=None,  # Google doesn't provide URLs, only image data

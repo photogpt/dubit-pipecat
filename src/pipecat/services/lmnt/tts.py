@@ -7,8 +7,9 @@
 """LMNT text-to-speech service implementation."""
 
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -36,14 +37,17 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-def language_to_lmnt_language(language: Language) -> Optional[str]:
+def language_to_lmnt_language(language: Language) -> str:
     """Convert a Language enum to LMNT language code.
 
     Args:
         language: The Language enum value to convert.
 
     Returns:
-        The corresponding LMNT language code, or None if not supported.
+        The corresponding service language code. If ``language`` is not in
+        the verified mapping, falls back to the base language code (e.g.,
+        ``en`` from ``en-US``) and logs a warning (via
+        ``resolve_language(..., use_base_code=True)``).
     """
     LANGUAGE_MAP = {
         Language.AR: "ar",
@@ -94,12 +98,12 @@ class LmntTTSService(InterruptibleTTSService):
         self,
         *,
         api_key: str,
-        voice_id: Optional[str] = None,
-        sample_rate: Optional[int] = None,
+        voice_id: str | None = None,
+        sample_rate: int | None = None,
         language: Language = Language.EN,
         output_format: str = "pcm_s16le",
-        model: Optional[str] = None,
-        settings: Optional[Settings] = None,
+        model: str | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the LMNT TTS service.
@@ -173,7 +177,7 @@ class LmntTTSService(InterruptibleTTSService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to LMNT service language format.
 
         Args:
@@ -266,10 +270,11 @@ class LmntTTSService(InterruptibleTTSService):
             }
 
             # Connect to LMNT's websocket directly
-            self._websocket = await websocket_connect("wss://api.lmnt.com/v1/ai/speech/stream")
+            websocket = await websocket_connect("wss://api.lmnt.com/v1/ai/speech/stream")
+            self._websocket = websocket
 
             # Send initialization message
-            await self._websocket.send(json.dumps(init_msg))
+            await websocket.send(json.dumps(init_msg))
 
             await self._call_event_handler("on_connected")
         except Exception as e:
@@ -300,7 +305,7 @@ class LmntTTSService(InterruptibleTTSService):
             return self._websocket
         raise Exception("Websocket not connected")
 
-    async def flush_audio(self, context_id: Optional[str] = None):
+    async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio synthesis."""
         if not self._websocket or self._websocket.state is State.CLOSED:
             return
@@ -335,7 +340,7 @@ class LmntTTSService(InterruptibleTTSService):
                     logger.error(f"Invalid JSON message: {message}")
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate TTS audio from text using LMNT's streaming API.
 
         Args:

@@ -12,7 +12,7 @@ information to bot functions.
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import WebSocket
 from pydantic import BaseModel
@@ -34,9 +34,9 @@ class DialinSettings(BaseModel):
 
     call_id: str
     call_domain: str
-    To: Optional[str] = None
-    From: Optional[str] = None
-    sip_headers: Optional[Dict[str, str]] = None
+    To: str | None = None
+    From: str | None = None
+    sip_headers: dict[str, str] | None = None
 
 
 class DailyDialinRequest(BaseModel):
@@ -58,14 +58,26 @@ class DailyDialinRequest(BaseModel):
 
 @dataclass
 class RunnerArguments:
-    """Base class for runner session arguments."""
+    """Base class for runner session arguments.
+
+    Parameters:
+        handle_sigint: Whether the bot should install a SIGINT handler.
+        handle_sigterm: Whether the bot should install a SIGTERM handler.
+        pipeline_idle_timeout_secs: Seconds the pipeline may stay idle before
+            shutting down.
+        body: Optional request body data passed from the runner entry point.
+        session_id: Identifier for this bot session.
+        cli_args: Parsed CLI arguments from the runner, when launched via the
+            development runner.
+    """
 
     # Use kw_only so subclasses don't need to worry about ordering.
     handle_sigint: bool = field(init=False, kw_only=True)
     handle_sigterm: bool = field(init=False, kw_only=True)
     pipeline_idle_timeout_secs: int = field(init=False, kw_only=True)
-    body: Optional[Any] = field(default_factory=dict, kw_only=True)
-    cli_args: Optional[argparse.Namespace] = field(default=None, init=False, kw_only=True)
+    body: Any | None = field(default_factory=dict, kw_only=True)
+    session_id: str | None = field(default=None, kw_only=True)
+    cli_args: argparse.Namespace | None = field(default=None, init=False, kw_only=True)
 
     def __post_init__(self):
         self.handle_sigint = False
@@ -84,7 +96,7 @@ class DailyRunnerArguments(RunnerArguments):
     """
 
     room_url: str
-    token: Optional[str] = None
+    token: str | None = None
 
 
 @dataclass
@@ -122,4 +134,4 @@ class LiveKitRunnerArguments(RunnerArguments):
 
     room_name: str
     url: str
-    token: Optional[str] = None
+    token: str

@@ -12,8 +12,9 @@ the Cartesia Live transcription API for real-time speech recognition.
 
 import json
 import urllib.parse
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -155,10 +156,10 @@ class CartesiaSTTService(WebsocketSTTService):
         api_key: str,
         base_url: str = "",
         encoding: str = "pcm_s16le",
-        sample_rate: Optional[int] = None,
-        live_options: Optional[CartesiaLiveOptions] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = CARTESIA_TTFS_P99,
+        sample_rate: int | None = None,
+        live_options: CartesiaLiveOptions | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = CARTESIA_TTFS_P99,
         **kwargs,
     ):
         """Initialize CartesiaSTTService with API key and options.
@@ -276,7 +277,7 @@ class CartesiaSTTService(WebsocketSTTService):
             if self._websocket and self._websocket.state is State.OPEN:
                 await self._websocket.send("finalize")
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Process audio data for speech-to-text transcription.
 
         Args:
@@ -289,7 +290,15 @@ class CartesiaSTTService(WebsocketSTTService):
         if not self._websocket or self._websocket.state is not State.OPEN:
             await self._connect()
 
-        await self._websocket.send(audio)
+        if self._websocket is None:
+            logger.warning(f"{self}: websocket unavailable after reconnect, dropping audio")
+            yield None
+            return
+
+        try:
+            await self._websocket.send(audio)
+        except Exception as e:
+            logger.warning(f"{self}: send failed: {e}")
         yield None
 
     async def _connect(self):
@@ -323,9 +332,7 @@ class CartesiaSTTService(WebsocketSTTService):
         if not changed:
             return changed
 
-        if self._websocket:
-            await self._disconnect()
-            await self._connect()
+        await self._request_reconnect()
 
         return changed
 
@@ -391,7 +398,7 @@ class CartesiaSTTService(WebsocketSTTService):
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         pass

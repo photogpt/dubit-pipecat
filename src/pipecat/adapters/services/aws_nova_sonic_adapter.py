@@ -8,9 +8,9 @@
 
 import copy
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict, cast
 
 from loguru import logger
 
@@ -55,9 +55,9 @@ class AWSNovaSonicLLMInvocationParams(TypedDict):
     This is a placeholder until support for universal LLMContext machinery is added for AWS Nova Sonic.
     """
 
-    system_instruction: Optional[str]
-    messages: List[AWSNovaSonicConversationHistoryMessage]
-    tools: List[Dict[str, Any]]
+    system_instruction: str | None
+    messages: list[AWSNovaSonicConversationHistoryMessage]
+    tools: list[dict[str, Any]]
 
 
 class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
@@ -73,7 +73,7 @@ class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
         return "aws-nova-sonic"
 
     def get_llm_invocation_params(
-        self, context: LLMContext, *, system_instruction: Optional[str] = None
+        self, context: LLMContext, *, system_instruction: str | None = None
     ) -> AWSNovaSonicLLMInvocationParams:
         """Get AWS Nova Sonic-specific LLM invocation parameters from a universal LLM context.
 
@@ -97,7 +97,7 @@ class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
             "tools": self.from_standard_tools(context.tools) or [],
         }
 
-    def get_messages_for_logging(self, context) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about AWS Nova Sonic.
 
         Removes or truncates sensitive data like image content for safe logging.
@@ -110,31 +110,43 @@ class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
         Returns:
             List of messages in a format ready for logging about AWS Nova Sonic.
         """
-        return self._from_universal_context_messages(self.get_messages(context)).messages
+        return [
+            asdict(m)
+            for m in self._from_universal_context_messages(self.get_messages(context)).messages
+        ]
 
     @dataclass
     class ConvertedMessages:
         """Container for Google-formatted messages converted from universal context."""
 
-        messages: List[AWSNovaSonicConversationHistoryMessage]
-        system_instruction: Optional[str] = None
+        messages: list[AWSNovaSonicConversationHistoryMessage]
+        system_instruction: str | None = None
 
     def _from_universal_context_messages(
-        self, universal_context_messages: List[LLMContextMessage]
+        self, universal_context_messages: list[LLMContextMessage]
     ) -> ConvertedMessages:
         system_instruction = None
-        messages = []
+        messages: list[AWSNovaSonicConversationHistoryMessage] = []
 
         # Bail if there are no messages
         if not universal_context_messages:
-            return self.ConvertedMessages()
+            return self.ConvertedMessages(messages=[])
 
-        universal_context_messages = copy.deepcopy(universal_context_messages)
+        # NOTE: This adapter does not yet handle ``LLMSpecificMessage`` —
+        # those are filtered out below (the role-extraction and conversion
+        # logic only applies to standard message dicts). If/when this
+        # adapter grows a per-provider passthrough like the Anthropic
+        # adapter has, LLMSpecific items can flow through.
+        ucm: list[dict[str, Any]] = [
+            cast(dict[str, Any], m)
+            for m in copy.deepcopy(universal_context_messages)
+            if isinstance(m, dict)
+        ]
 
         # If we have a "system" message as our first message,
         # pull that out into "instruction"
-        if universal_context_messages[0].get("role") == "system":
-            system = universal_context_messages.pop(0)
+        if ucm and ucm[0].get("role") == "system":
+            system = ucm.pop(0)
             content = system.get("content")
             if isinstance(content, str):
                 system_instruction = content
@@ -145,19 +157,21 @@ class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
 
         # Convert any remaining "system"/"developer" messages to "user",
         # as Nova Sonic only supports "user" and "assistant" in history.
-        for msg in universal_context_messages:
+        for msg in ucm:
             if msg.get("role") in ("system", "developer"):
                 msg["role"] = "user"
 
         # Process remaining messages to fill out conversation history.
-        for universal_context_message in universal_context_messages:
+        for universal_context_message in ucm:
             message = self._from_universal_context_message(universal_context_message)
             if message:
                 messages.append(message)
 
         return self.ConvertedMessages(messages=messages, system_instruction=system_instruction)
 
-    def _from_universal_context_message(self, message) -> AWSNovaSonicConversationHistoryMessage:
+    def _from_universal_context_message(
+        self, message: dict[str, Any]
+    ) -> AWSNovaSonicConversationHistoryMessage | None:
         """Convert standard message format to Nova Sonic format.
 
         Args:
@@ -167,17 +181,18 @@ class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
             Nova Sonic conversation history message, or None if not convertible.
         """
         role = message.get("role")
-        if message.get("role") == "user" or message.get("role") == "assistant":
+        if role == "user" or role == "assistant":
             content = message.get("content")
-            if isinstance(message.get("content"), list):
-                content = ""
-                for c in message.get("content"):
+            if isinstance(content, list):
+                text_parts = []
+                for c in content:
                     if c.get("type") == "text":
-                        content += " " + c.get("text")
+                        text_parts.append(c.get("text"))
                     else:
                         logger.error(
                             f"Unhandled content type in context message: {c.get('type')} - {message}"
                         )
+                content = " ".join(t for t in text_parts if t)
             # There won't be content if this is an assistant tool call entry.
             # We're ignoring those since they can't be loaded into AWS Nova Sonic conversation
             # history
@@ -187,7 +202,7 @@ class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
         # Sonic conversation history
 
     @staticmethod
-    def _to_aws_nova_sonic_function_format(function: FunctionSchema) -> Dict[str, Any]:
+    def _to_aws_nova_sonic_function_format(function: FunctionSchema) -> dict[str, Any]:
         """Convert a function schema to AWS Nova Sonic format.
 
         Args:
@@ -212,7 +227,7 @@ class AWSNovaSonicLLMAdapter(BaseLLMAdapter[AWSNovaSonicLLMInvocationParams]):
             }
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert tools schema to AWS Nova Sonic function-calling format.
 
         Args:

@@ -7,8 +7,9 @@
 import base64
 import os
 import warnings
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -18,6 +19,7 @@ from pipecat import version as pipecat_version
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    ErrorFrame,
     Frame,
     InterruptionFrame,
     StartFrame,
@@ -25,7 +27,7 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -93,18 +95,18 @@ class HumeTTSService(TTSService):
             trailing_silence: Seconds of silence to append at the end (0-5).
         """
 
-        description: Optional[str] = None
-        speed: Optional[float] = None
-        trailing_silence: Optional[float] = None
+        description: str | None = None
+        speed: float | None = None
+        trailing_silence: float | None = None
 
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        voice_id: Optional[str] = None,
-        params: Optional[InputParams] = None,
-        sample_rate: Optional[int] = HUME_SAMPLE_RATE,
-        settings: Optional[Settings] = None,
+        api_key: str | None = None,
+        voice_id: str | None = None,
+        params: InputParams | None = None,
+        sample_rate: int | None = HUME_SAMPLE_RATE,
+        settings: Settings | None = None,
         **kwargs,
     ) -> None:
         """Initialize the HumeTTSService.
@@ -288,10 +290,14 @@ class HumeTTSService(TTSService):
         """
         logger.debug(f"{self}: Generating Hume TTS: [{text}]")
 
+        voice_id = assert_given(self._settings.voice)
+        if voice_id is None:
+            yield ErrorFrame(error="Hume TTS voice must be specified")
+            return
         # Build the request payload
         utterance_kwargs: dict[str, Any] = {
             "text": text,
-            "voice": PostedUtteranceVoiceWithId(id=self._settings.voice),
+            "voice": PostedUtteranceVoiceWithId(id=voice_id),
         }
         if self._settings.description is not None:
             utterance_kwargs["description"] = self._settings.description

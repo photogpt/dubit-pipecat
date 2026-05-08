@@ -12,8 +12,9 @@ WebSocket API for streaming audio transcription.
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlencode
 
 from loguru import logger
@@ -114,7 +115,7 @@ class AssemblyAISTTSettings(STTSettings):
     )
     min_turn_silence: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     max_turn_silence: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    keyterms_prompt: List[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    keyterms_prompt: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     prompt: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     language_detection: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     format_turns: bool | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -148,17 +149,17 @@ class AssemblyAISTTService(WebsocketSTTService):
         self,
         *,
         api_key: str,
-        language: Optional[Language] = None,
+        language: Language | None = None,
         api_endpoint_base_url: str = "wss://streaming.assemblyai.com/v3/ws",
         sample_rate: int = 16000,
         encoding: str = "pcm_s16le",
-        connection_params: Optional[AssemblyAIConnectionParams] = None,
+        connection_params: AssemblyAIConnectionParams | None = None,
         vad_force_turn_endpoint: bool = True,
         vad_enabled: bool = False,
         should_interrupt: bool = True,
-        speaker_format: Optional[str] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = ASSEMBLYAI_TTFS_P99,
+        speaker_format: str | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = ASSEMBLYAI_TTFS_P99,
         **kwargs,
     ):
         """Initialize the AssemblyAI STT service.
@@ -237,10 +238,11 @@ class AssemblyAISTTService(WebsocketSTTService):
                 sample_rate = connection_params.sample_rate
                 encoding = connection_params.encoding
                 default_settings.model = connection_params.speech_model
-                default_settings.formatted_finals = connection_params.formatted_finals
-                default_settings.word_finalization_max_wait_time = (
-                    connection_params.word_finalization_max_wait_time
-                )
+                # Note: `formatted_finals` and `word_finalization_max_wait_time`
+                # were added to Settings after this deprecated input model
+                # was frozen and have no equivalent on
+                # AssemblyAIConnectionParams; they are only configurable via
+                # the canonical `settings=...` API.
                 default_settings.end_of_turn_confidence_threshold = (
                     connection_params.end_of_turn_confidence_threshold
                 )
@@ -423,7 +425,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Process audio data for speech-to-text conversion.
 
         Args:
@@ -438,7 +440,11 @@ class AssemblyAISTTService(WebsocketSTTService):
             while len(self._audio_buffer) >= self._chunk_size_bytes:
                 chunk = bytes(self._audio_buffer[: self._chunk_size_bytes])
                 self._audio_buffer = self._audio_buffer[self._chunk_size_bytes :]
-                await self._websocket.send(chunk)
+                try:
+                    await self._websocket.send(chunk)
+                except Exception as e:
+                    logger.warning(f"{self}: send failed: {e}")
+                    break
 
         yield None
 
@@ -549,7 +555,7 @@ class AssemblyAISTTService(WebsocketSTTService):
 
                     try:
                         await asyncio.wait_for(self._termination_event.wait(), timeout=5.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.warning("Timed out waiting for termination message from server")
 
                 except Exception as e:
@@ -631,7 +637,7 @@ class AssemblyAISTTService(WebsocketSTTService):
             except json.JSONDecodeError:
                 logger.warning(f"Received non-JSON message: {message}")
 
-    def _parse_message(self, message: Dict[str, Any]) -> BaseMessage:
+    def _parse_message(self, message: dict[str, Any]) -> BaseMessage:
         """Parse a raw message into the appropriate message type."""
         msg_type = message.get("type")
 
@@ -646,7 +652,7 @@ class AssemblyAISTTService(WebsocketSTTService):
         else:
             raise ValueError(f"Unknown message type: {msg_type}")
 
-    async def _handle_message(self, message: Dict[str, Any]):
+    async def _handle_message(self, message: dict[str, Any]):
         """Handle AssemblyAI WebSocket messages."""
         try:
             parsed_message = self._parse_message(message)

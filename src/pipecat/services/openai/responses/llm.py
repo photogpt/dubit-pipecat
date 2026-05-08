@@ -10,13 +10,15 @@ import asyncio
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any
 
 import httpx
 from loguru import logger
 from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream, DefaultAsyncHttpxClient
+from openai._types import NotGiven as OpenAINotGiven
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseFunctionCallArgumentsDeltaEvent,
@@ -48,7 +50,7 @@ from pipecat.services.llm_service import (
     WebsocketReconnectedError,
 )
 from pipecat.services.settings import NOT_GIVEN as _NOT_GIVEN
-from pipecat.services.settings import LLMSettings, _NotGiven
+from pipecat.services.settings import LLMSettings, _NotGiven, assert_given
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 try:
@@ -96,7 +98,16 @@ class OpenAIResponsesLLMSettings(LLMSettings):
         max_completion_tokens: Maximum completion tokens to generate.
     """
 
-    max_completion_tokens: int | _NotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    # Override inherited LLMSettings fields to also accept openai's NotGiven
+    # sentinel. The service stores openai's NOT_GIVEN in these fields so they
+    # can be passed through unchanged to the AsyncOpenAI client.
+    temperature: float | None | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
+    top_p: float | None | _NotGiven | OpenAINotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    max_completion_tokens: int | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +115,7 @@ class OpenAIResponsesLLMSettings(LLMSettings):
 # ---------------------------------------------------------------------------
 
 
-class _BaseOpenAIResponsesLLMService(LLMService):
+class _BaseOpenAIResponsesLLMService(LLMService[OpenAIResponsesLLMAdapter]):
     """Shared base for HTTP and WebSocket OpenAI Responses API services.
 
     Contains settings, adapter reference, HTTP client creation, parameter
@@ -124,9 +135,9 @@ class _BaseOpenAIResponsesLLMService(LLMService):
         base_url=None,
         organization=None,
         project=None,
-        default_headers: Optional[Mapping[str, str]] = None,
-        service_tier: Optional[str] = None,
-        settings: Optional[Settings] = None,
+        default_headers: Mapping[str, str] | None = None,
+        service_tier: str | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the OpenAI Responses API LLM service.
@@ -227,7 +238,7 @@ class _BaseOpenAIResponsesLLMService(LLMService):
         Returns:
             Dictionary of parameters for the Responses API call.
         """
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "model": self._settings.model,
             "stream": True,
             # store=False avoids OpenAI-side 30-day conversation storage.
@@ -268,9 +279,9 @@ class _BaseOpenAIResponsesLLMService(LLMService):
     async def run_inference(
         self,
         context: LLMContext,
-        max_tokens: Optional[int] = None,
-        system_instruction: Optional[str] = None,
-    ) -> Optional[str]:
+        max_tokens: int | None = None,
+        system_instruction: str | None = None,
+    ) -> str | None:
         """Run a one-shot, out-of-band inference with the given LLM context.
 
         Always uses the HTTP client regardless of transport variant.
@@ -283,8 +294,10 @@ class _BaseOpenAIResponsesLLMService(LLMService):
         Returns:
             The LLM's response as a string, or None if no response is generated.
         """
-        adapter: OpenAIResponsesLLMAdapter = self.get_llm_adapter()
-        effective_instruction = system_instruction or self._settings.system_instruction
+        adapter = self.get_llm_adapter()
+        effective_instruction = system_instruction or assert_given(
+            self._settings.system_instruction
+        )
         invocation_params = adapter.get_llm_invocation_params(
             context, system_instruction=effective_instruction
         )
@@ -304,8 +317,8 @@ class _BaseOpenAIResponsesLLMService(LLMService):
     def _process_function_calls(
         self,
         context: LLMContext,
-        function_calls: Dict[str, Dict[str, str]],
-    ) -> List[FunctionCallFromLLM]:
+        function_calls: dict[str, dict[str, str]],
+    ) -> list[FunctionCallFromLLM]:
         """Convert accumulated function call data into FunctionCallFromLLM list.
 
         Args:
@@ -315,7 +328,7 @@ class _BaseOpenAIResponsesLLMService(LLMService):
         Returns:
             List of parsed function call objects.
         """
-        fc_list: List[FunctionCallFromLLM] = []
+        fc_list: list[FunctionCallFromLLM] = []
         for item_id, fc in function_calls.items():
             try:
                 arguments = json.loads(fc["arguments"]) if fc["arguments"] else {}
@@ -340,7 +353,9 @@ class _BaseOpenAIResponsesLLMService(LLMService):
 # ---------------------------------------------------------------------------
 
 
-class OpenAIResponsesLLMService(_BaseOpenAIResponsesLLMService, WebsocketLLMService):
+class OpenAIResponsesLLMService(
+    _BaseOpenAIResponsesLLMService, WebsocketLLMService[OpenAIResponsesLLMAdapter]
+):
     """OpenAI Responses API LLM service using WebSocket transport.
 
     Maintains a persistent WebSocket connection to ``wss://api.openai.com/v1/responses``
@@ -388,13 +403,13 @@ class OpenAIResponsesLLMService(_BaseOpenAIResponsesLLMService, WebsocketLLMServ
         self._ws_url = ws_url
 
         # State for previous_response_id optimization
-        self._previous_response_id: Optional[str] = None
-        self._previous_input_hash: Optional[str] = None
-        self._previous_input_length: Optional[int] = None
-        self._previous_response_output: Optional[list] = None
+        self._previous_response_id: str | None = None
+        self._previous_input_hash: str | None = None
+        self._previous_input_length: int | None = None
+        self._previous_response_output: list | None = None
 
         # Response cancellation state
-        self._current_response_id: Optional[str] = None  # ID of current non-cancelled response
+        self._current_response_id: str | None = None  # ID of current non-cancelled response
         self._cancel_pending_response: bool = False
         self._needs_drain: bool = False
 
@@ -659,7 +674,7 @@ class OpenAIResponsesLLMService(_BaseOpenAIResponsesLLMService, WebsocketLLMServ
                     )
                     self._clear_cancellation_state()
                     return
-        except (asyncio.TimeoutError, WebsocketReconnectedError, ConnectionClosed) as e:
+        except (TimeoutError, WebsocketReconnectedError, ConnectionClosed) as e:
             logger.warning(f"{self}: Error draining cancelled response: {e}")
             self._clear_cancellation_state()
 
@@ -734,14 +749,14 @@ class OpenAIResponsesLLMService(_BaseOpenAIResponsesLLMService, WebsocketLLMServ
         if self._needs_drain:
             await self._drain_cancelled_response()
 
-        adapter: OpenAIResponsesLLMAdapter = self.get_llm_adapter()
+        adapter = self.get_llm_adapter()
         logger.debug(
             f"{self}: Generating response from universal context "
             f"{adapter.get_messages_for_logging(context)}"
         )
 
         invocation_params = adapter.get_llm_invocation_params(
-            context, system_instruction=self._settings.system_instruction
+            context, system_instruction=assert_given(self._settings.system_instruction)
         )
 
         full_input = invocation_params["input"]
@@ -815,8 +830,8 @@ class OpenAIResponsesLLMService(_BaseOpenAIResponsesLLMService, WebsocketLLMServ
             WebsocketReconnectedError: Connection was lost and auto-recovered.
             ConnectionClosed: Connection was lost and could not be recovered.
         """
-        function_calls: Dict[str, Dict[str, str]] = {}
-        current_arguments: Dict[str, str] = {}
+        function_calls: dict[str, dict[str, str]] = {}
+        current_arguments: dict[str, str] = {}
 
         while True:
             event = await self._ws_recv()
@@ -974,14 +989,14 @@ class OpenAIResponsesHttpLLMService(_BaseOpenAIResponsesLLMService):
 
     @traced_llm
     async def _process_context(self, context: LLMContext):
-        adapter: OpenAIResponsesLLMAdapter = self.get_llm_adapter()
+        adapter = self.get_llm_adapter()
         logger.debug(
             f"{self}: Generating response from universal context "
             f"{adapter.get_messages_for_logging(context)}"
         )
 
         invocation_params = adapter.get_llm_invocation_params(
-            context, system_instruction=self._settings.system_instruction
+            context, system_instruction=assert_given(self._settings.system_instruction)
         )
 
         params = self._build_response_params(invocation_params)
@@ -991,8 +1006,8 @@ class OpenAIResponsesHttpLLMService(_BaseOpenAIResponsesLLMService):
         stream: AsyncStream[ResponseStreamEvent] = await self._client.responses.create(**params)
 
         # Track function calls across stream events
-        function_calls: Dict[str, Dict[str, str]] = {}  # item_id -> {name, call_id, arguments}
-        current_arguments: Dict[str, str] = {}  # item_id -> accumulated arguments
+        function_calls: dict[str, dict[str, str]] = {}  # item_id -> {name, call_id, arguments}
+        current_arguments: dict[str, str] = {}  # item_id -> accumulated arguments
 
         # Ensure stream and its async iterator are closed on cancellation/exception
         # to prevent socket leaks and uvloop crashes. Closing the iterator first

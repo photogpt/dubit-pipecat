@@ -40,9 +40,10 @@ See https://docs.sarvam.ai/api-reference-docs/text-to-speech/stream for full API
 import asyncio
 import base64
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, AsyncGenerator, ClassVar, Dict, List, Optional, Tuple
+from enum import StrEnum
+from typing import Any, ClassVar
 
 import aiohttp
 from loguru import logger
@@ -58,7 +59,7 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.services.sarvam._sdk import sdk_headers
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given, is_given
 from pipecat.services.tts_service import InterruptibleTTSService, TextAggregationMode, TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -72,7 +73,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-class SarvamTTSModel(str, Enum):
+class SarvamTTSModel(StrEnum):
     """Available Sarvam TTS models.
 
     Parameters:
@@ -92,7 +93,7 @@ class SarvamTTSModel(str, Enum):
     BULBUL_V3 = "bulbul:v3"
 
 
-class SarvamTTSSpeakerV2(str, Enum):
+class SarvamTTSSpeakerV2(StrEnum):
     """Available speakers for bulbul:v2 model.
 
     Female voices: anushka, manisha, vidya, arya
@@ -108,7 +109,7 @@ class SarvamTTSSpeakerV2(str, Enum):
     HITESH = "hitesh"
 
 
-class SarvamTTSSpeakerV3(str, Enum):
+class SarvamTTSSpeakerV3(StrEnum):
     """Available speakers for bulbul:v3-beta model.
 
     Includes a wider variety of voices with different characteristics.
@@ -161,12 +162,12 @@ class TTSModelConfig:
     supports_temperature: bool
     default_sample_rate: int
     default_speaker: str
-    pace_range: Tuple[float, float]
+    pace_range: tuple[float, float]
     preprocessing_always_enabled: bool
-    speakers: Tuple[str, ...]
+    speakers: tuple[str, ...]
 
 
-TTS_MODEL_CONFIGS: Dict[str, TTSModelConfig] = {
+TTS_MODEL_CONFIGS: dict[str, TTSModelConfig] = {
     "bulbul:v2": TTSModelConfig(
         supports_pitch=True,
         supports_loudness=True,
@@ -200,7 +201,7 @@ TTS_MODEL_CONFIGS: Dict[str, TTSModelConfig] = {
 }
 
 
-def get_speakers_for_model(model: str) -> List[str]:
+def get_speakers_for_model(model: str) -> list[str]:
     """Get the list of available speakers for a given model.
 
     Args:
@@ -215,14 +216,16 @@ def get_speakers_for_model(model: str) -> List[str]:
     return list(TTS_MODEL_CONFIGS["bulbul:v2"].speakers)
 
 
-def language_to_sarvam_language(language: Language) -> Optional[str]:
+def language_to_sarvam_language(language: Language) -> str:
     """Convert Pipecat Language enum to Sarvam AI language codes.
 
     Args:
         language: The Language enum value to convert.
 
     Returns:
-        The corresponding Sarvam AI language code, or None if not supported.
+        The corresponding service language code. If ``language`` is not in
+        the verified mapping, falls back to the full language code string and
+        logs a warning (via ``resolve_language(..., use_base_code=False)``).
     """
     LANGUAGE_MAP = {
         Language.BN: "bn-IN",  # Bengali
@@ -291,7 +294,7 @@ class SarvamTTSSettings(SarvamHttpTTSSettings):
             Controls memory usage and processing efficiency. Defaults to 150.
     """
 
-    _aliases: ClassVar[Dict[str, str]] = {"target_language_code": "language"}
+    _aliases: ClassVar[dict[str, str]] = {"target_language_code": "language"}
 
     min_buffer_size: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     max_chunk_length: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -374,30 +377,30 @@ class SarvamHttpTTSService(TTSService):
                 **Note:** Only supported for bulbul:v3-beta. Ignored for v2.
         """
 
-        language: Optional[Language] = Language.EN
-        pitch: Optional[float] = Field(
+        language: Language | None = Language.EN
+        pitch: float | None = Field(
             default=0.0,
             ge=-0.75,
             le=0.75,
             description="Voice pitch adjustment. Only for bulbul:v2.",
         )
-        pace: Optional[float] = Field(
+        pace: float | None = Field(
             default=1.0,
             ge=0.3,
             le=3.0,
             description="Speech pace. v2: 0.3-3.0, v3: 0.5-2.0.",
         )
-        loudness: Optional[float] = Field(
+        loudness: float | None = Field(
             default=1.0,
             ge=0.3,
             le=3.0,
             description="Volume multiplier. Only for bulbul:v2.",
         )
-        enable_preprocessing: Optional[bool] = Field(
+        enable_preprocessing: bool | None = Field(
             default=False,
             description="Enable text preprocessing. Always enabled for v3-beta model.",
         )
-        temperature: Optional[float] = Field(
+        temperature: float | None = Field(
             default=0.6,
             ge=0.01,
             le=1.0,
@@ -409,12 +412,12 @@ class SarvamHttpTTSService(TTSService):
         *,
         api_key: str,
         aiohttp_session: aiohttp.ClientSession,
-        voice_id: Optional[str] = None,
-        model: Optional[str] = None,
+        voice_id: str | None = None,
+        model: str | None = None,
         base_url: str = "https://api.sarvam.ai",
-        sample_rate: Optional[int] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        sample_rate: int | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Sarvam TTS service.
@@ -488,8 +491,8 @@ class SarvamHttpTTSService(TTSService):
             default_settings.apply_update(settings)
 
         # Get model configuration (validates model exists)
-        resolved_model = default_settings.model
-        if resolved_model not in TTS_MODEL_CONFIGS:
+        resolved_model = assert_given(default_settings.model)
+        if resolved_model is None or resolved_model not in TTS_MODEL_CONFIGS:
             allowed = ", ".join(sorted(TTS_MODEL_CONFIGS.keys()))
             raise ValueError(f"Unsupported model '{resolved_model}'. Allowed values: {allowed}.")
 
@@ -500,11 +503,11 @@ class SarvamHttpTTSService(TTSService):
             sample_rate = self._config.default_sample_rate
 
         # Set default voice based on model if not specified via any mechanism
-        if voice_id is None and (settings is None or settings.voice is NOT_GIVEN):
+        if voice_id is None and (settings is None or not is_given(settings.voice)):
             default_settings.voice = self._config.default_speaker
 
         # Validate and clamp pace to model's valid range
-        pace = default_settings.pace
+        pace = assert_given(default_settings.pace)
         pace_min, pace_max = self._config.pace_range
         if pace is not None and (pace < pace_min or pace > pace_max):
             logger.warning(f"Pace {pace} is outside model range ({pace_min}-{pace_max}). Clamping.")
@@ -548,7 +551,7 @@ class SarvamHttpTTSService(TTSService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Sarvam AI language format.
 
         Args:
@@ -568,7 +571,7 @@ class SarvamHttpTTSService(TTSService):
         await super().start(frame)
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using Sarvam AI's API.
 
         Args:
@@ -754,46 +757,46 @@ class SarvamTTSService(InterruptibleTTSService):
               roopa, kabir, aayan, shubh, ashutosh, advait, amelia, sophia
         """
 
-        pitch: Optional[float] = Field(
+        pitch: float | None = Field(
             default=0.0,
             ge=-0.75,
             le=0.75,
             description="Voice pitch adjustment. Only for bulbul:v2.",
         )
-        pace: Optional[float] = Field(
+        pace: float | None = Field(
             default=1.0,
             ge=0.3,
             le=3.0,
             description="Speech pace. v2: 0.3-3.0, v3: 0.5-2.0.",
         )
-        loudness: Optional[float] = Field(
+        loudness: float | None = Field(
             default=1.0,
             ge=0.3,
             le=3.0,
             description="Volume multiplier. Only for bulbul:v2.",
         )
-        enable_preprocessing: Optional[bool] = Field(
+        enable_preprocessing: bool | None = Field(
             default=False,
             description="Enable text preprocessing. Always enabled for v3 models.",
         )
-        min_buffer_size: Optional[int] = Field(
+        min_buffer_size: int | None = Field(
             default=50,
             description="Minimum characters to buffer before TTS processing.",
         )
-        max_chunk_length: Optional[int] = Field(
+        max_chunk_length: int | None = Field(
             default=150,
             description="Maximum length for sentence splitting.",
         )
-        output_audio_codec: Optional[str] = Field(
+        output_audio_codec: str | None = Field(
             default="linear16",
             description="Audio codec: linear16, mulaw, alaw, opus, flac, aac, wav, mp3.",
         )
-        output_audio_bitrate: Optional[str] = Field(
+        output_audio_bitrate: str | None = Field(
             default="128k",
             description="Audio bitrate: 32k, 64k, 96k, 128k, 192k.",
         )
-        language: Optional[Language] = Language.EN
-        temperature: Optional[float] = Field(
+        language: Language | None = Language.EN
+        temperature: float | None = Field(
             default=0.6,
             ge=0.01,
             le=1.0,
@@ -804,14 +807,14 @@ class SarvamTTSService(InterruptibleTTSService):
         self,
         *,
         api_key: str,
-        model: Optional[str] = None,
-        voice_id: Optional[str] = None,
+        model: str | None = None,
+        voice_id: str | None = None,
         url: str = "wss://api.sarvam.ai/text-to-speech/ws",
-        aggregate_sentences: Optional[bool] = None,
-        text_aggregation_mode: Optional[TextAggregationMode] = None,
-        sample_rate: Optional[int] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        aggregate_sentences: bool | None = None,
+        text_aggregation_mode: TextAggregationMode | None = None,
+        sample_rate: int | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Sarvam TTS service with voice and transport configuration.
@@ -906,8 +909,8 @@ class SarvamTTSService(InterruptibleTTSService):
             default_settings.apply_update(settings)
 
         # Get model configuration (validates model exists)
-        resolved_model = default_settings.model
-        if resolved_model not in TTS_MODEL_CONFIGS:
+        resolved_model = assert_given(default_settings.model)
+        if resolved_model is None or resolved_model not in TTS_MODEL_CONFIGS:
             allowed = ", ".join(sorted(TTS_MODEL_CONFIGS.keys()))
             raise ValueError(f"Unsupported model '{resolved_model}'. Allowed values: {allowed}.")
 
@@ -918,11 +921,11 @@ class SarvamTTSService(InterruptibleTTSService):
             sample_rate = self._config.default_sample_rate
 
         # Set default voice based on model if not specified via any mechanism
-        if voice_id is None and (settings is None or settings.voice is NOT_GIVEN):
+        if voice_id is None and (settings is None or not is_given(settings.voice)):
             default_settings.voice = self._config.default_speaker
 
         # Validate and clamp pace to model's valid range
-        pace = default_settings.pace
+        pace = assert_given(default_settings.pace)
         pace_min, pace_max = self._config.pace_range
         if pace is not None and (pace < pace_min or pace > pace_max):
             logger.warning(f"Pace {pace} is outside model range ({pace_min}-{pace_max}). Clamping.")
@@ -979,7 +982,7 @@ class SarvamTTSService(InterruptibleTTSService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Sarvam AI language format.
 
         Args:
@@ -1020,7 +1023,7 @@ class SarvamTTSService(InterruptibleTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def flush_audio(self, context_id: Optional[str] = None):
+    async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio synthesis by sending flush command."""
         try:
             if self._websocket:
@@ -1191,7 +1194,7 @@ class SarvamTTSService(InterruptibleTTSService):
             logger.warning("WebSocket not ready, cannot send text")
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech audio frames from input text using Sarvam TTS.
 
         Sends text over WebSocket for synthesis and yields corresponding audio or status frames.

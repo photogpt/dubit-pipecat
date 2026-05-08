@@ -11,20 +11,15 @@ including data frames, system frames, and control frames for audio, video, text,
 and LLM processing.
 """
 
+from __future__ import annotations
+
 import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
-    Callable,
-    Dict,
-    List,
     Literal,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
 )
 
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -45,7 +40,7 @@ if TYPE_CHECKING:
     from pipecat.utils.tracing.tracing_context import TracingContext
 
 
-def format_pts(pts: Optional[int]):
+def format_pts(pts: int | None):
     """Format presentation timestamp (PTS) in nanoseconds to a human-readable string.
 
     Converts a PTS value in nanoseconds to a string representation.
@@ -77,20 +72,20 @@ class Frame:
 
     id: int = field(init=False)
     name: str = field(init=False)
-    pts: Optional[int] = field(init=False)
-    broadcast_sibling_id: Optional[int] = field(init=False)
-    metadata: Dict[str, Any] = field(init=False)
-    transport_source: Optional[str] = field(init=False)
-    transport_destination: Optional[str] = field(init=False)
+    pts: int | None = field(init=False)
+    broadcast_sibling_id: int | None = field(init=False)
+    metadata: dict[str, Any] = field(init=False)
+    transport_source: str | None = field(init=False)
+    transport_destination: str | None = field(init=False)
 
     def __post_init__(self):
         self.id: int = obj_id()
         self.name: str = f"{self.__class__.__name__}#{obj_count(self)}"
-        self.pts: Optional[int] = None
-        self.broadcast_sibling_id: Optional[int] = None
-        self.metadata: Dict[str, Any] = {}
-        self.transport_source: Optional[str] = None
-        self.transport_destination: Optional[str] = None
+        self.pts: int | None = None
+        self.broadcast_sibling_id: int | None = None
+        self.metadata: dict[str, Any] = {}
+        self.transport_source: str | None = None
+        self.transport_destination: str | None = None
 
     def __str__(self):
         return self.name
@@ -183,8 +178,8 @@ class ImageRawFrame:
     """
 
     image: bytes
-    size: Tuple[int, int]
-    format: Optional[str]
+    size: tuple[int, int]
+    format: str | None
 
 
 #
@@ -242,7 +237,7 @@ class TTSAudioRawFrame(OutputAudioRawFrame):
         context_id: Unique identifier for the TTS context that generated this audio.
     """
 
-    context_id: Optional[str] = None
+    context_id: str | None = None
 
 
 @dataclass
@@ -268,7 +263,7 @@ class URLImageRawFrame(OutputImageRawFrame):
         url: URL where the image can be downloaded from.
     """
 
-    url: Optional[str] = None
+    url: str | None = None
 
     def __str__(self):
         pts = format_pts(self.pts)
@@ -287,7 +282,7 @@ class SpriteFrame(DataFrame):
         images: List of image frames that make up the sprite animation.
     """
 
-    images: List[OutputImageRawFrame]
+    images: list[OutputImageRawFrame]
 
     def __str__(self):
         pts = format_pts(self.pts)
@@ -312,7 +307,7 @@ class TextFrame(DataFrame):
     """
 
     text: str
-    skip_tts: Optional[bool] = field(init=False)
+    skip_tts: bool | None = field(init=False)
     # Whether any necessary inter-frame (leading/trailing) spaces are already
     # included in the text.
     # NOTE: Ideally this would be available at init time with a default value,
@@ -357,7 +352,7 @@ class AggregatedTextFrame(TextFrame):
     """
 
     aggregated_by: AggregationType | str
-    context_id: Optional[str] = None
+    context_id: str | None = None
 
 
 @dataclass
@@ -375,7 +370,7 @@ class TTSTextFrame(AggregatedTextFrame):
         context_id: Unique identifier for the TTS context that generated this text.
     """
 
-    context_id: Optional[str] = None
+    context_id: str | None = None
 
 
 @dataclass
@@ -396,8 +391,8 @@ class TranscriptionFrame(TextFrame):
 
     user_id: str
     timestamp: str
-    language: Optional[Language] = None
-    result: Optional[Any] = None
+    language: Language | None = None
+    result: Any | None = None
     finalized: bool = False
 
     def __str__(self):
@@ -422,8 +417,8 @@ class InterimTranscriptionFrame(TextFrame):
     text: str
     user_id: str
     timestamp: str
-    language: Optional[Language] = None
-    result: Optional[Any] = None
+    language: Language | None = None
+    result: Any | None = None
 
     def __str__(self):
         return f"{self.name}(user: {self.user_id}, text: [{self.text}], language: {self.language}, timestamp: {self.timestamp})"
@@ -444,7 +439,7 @@ class TranslationFrame(TextFrame):
 
     user_id: str
     timestamp: str
-    language: Optional[Language] = None
+    language: Language | None = None
 
     def __str__(self):
         return f"{self.name}(user: {self.user_id}, text: [{self.text}], language: {self.language}, timestamp: {self.timestamp})"
@@ -472,7 +467,7 @@ class LLMContextFrame(Frame):
         context: The LLM context containing messages, tools, and configuration.
     """
 
-    context: "LLMContext"
+    context: LLMContext
 
 
 @dataclass
@@ -489,7 +484,7 @@ class LLMThoughtStartFrame(ControlFrame):
     """
 
     append_to_context: bool = False
-    llm: Optional[str] = None
+    llm: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -587,12 +582,12 @@ class LLMMessagesAppendFrame(DataFrame):
     current context.
 
     Parameters:
-        messages: List of message dictionaries to append.
+        messages: List of context messages to append.
         run_llm: Whether the context update should be sent to the LLM.
     """
 
-    messages: List[dict]
-    run_llm: Optional[bool] = None
+    messages: list[LLMContextMessage]
+    run_llm: bool | None = None
 
 
 @dataclass
@@ -603,12 +598,12 @@ class LLMMessagesUpdateFrame(DataFrame):
     context LLM messages.
 
     Parameters:
-        messages: List of message dictionaries to replace current context.
+        messages: List of context messages to replace current context.
         run_llm: Whether the context update should be sent to the LLM.
     """
 
-    messages: List[dict]
-    run_llm: Optional[bool] = None
+    messages: list[LLMContextMessage]
+    run_llm: bool | None = None
 
 
 @dataclass
@@ -624,8 +619,8 @@ class LLMMessagesTransformFrame(DataFrame):
         run_llm: Whether the context update should be sent to the LLM.
     """
 
-    transform: Callable[[List["LLMContextMessage"]], List["LLMContextMessage"]]
-    run_llm: Optional[bool] = None
+    transform: Callable[[list[LLMContextMessage]], list[LLMContextMessage]]
+    run_llm: bool | None = None
 
 
 @dataclass
@@ -640,7 +635,7 @@ class LLMSetToolsFrame(DataFrame):
         tools: List of tool/function definitions for the LLM.
     """
 
-    tools: List[dict] | ToolsSchema | "NotGiven"
+    tools: list[dict] | ToolsSchema | NotGiven
 
 
 @dataclass
@@ -692,8 +687,8 @@ class FunctionCallResultProperties:
             Only meaningful for async function calls (``cancel_on_interruption=False``).
     """
 
-    run_llm: Optional[bool] = None
-    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
+    run_llm: bool | None = None
+    on_context_updated: Callable[[], Awaitable[None]] | None = None
     is_final: bool = True
 
 
@@ -718,8 +713,8 @@ class FunctionCallResultFrame(DataFrame, UninterruptibleFrame):
     tool_call_id: str
     arguments: Any
     result: Any
-    run_llm: Optional[bool] = None
-    properties: Optional[FunctionCallResultProperties] = None
+    run_llm: bool | None = None
+    properties: FunctionCallResultProperties | None = None
 
 
 @dataclass
@@ -735,7 +730,7 @@ class TTSSpeakFrame(DataFrame):
     """
 
     text: str
-    append_to_context: Optional[bool] = None
+    append_to_context: bool | None = None
 
 
 @dataclass
@@ -754,26 +749,66 @@ class OutputTransportMessageFrame(DataFrame):
 
 @dataclass
 class DTMFFrame:
-    """Base class for DTMF (Dual-Tone Multi-Frequency) keypad frames.
+    """Marker base class for DTMF (Dual-Tone Multi-Frequency) keypad frames.
 
-    Parameters:
-        button: The DTMF keypad entry that was pressed.
+    Used only as a shared tag so that both input and output DTMF frames can
+    be identified via ``isinstance(frame, DTMFFrame)``. The concrete frames
+    define their own fields.
     """
 
-    button: KeypadEntry
+    pass
 
 
 @dataclass
 class OutputDTMFFrame(DTMFFrame, DataFrame):
     """DTMF keypress output frame for transport queuing.
 
-    A DTMF keypress output that will be queued. If your transport supports
-    multiple dial-out destinations, use the `transport_destination` field to
-    specify where the DTMF keypress should be sent.
+    Parameters:
+        button: Convenience shortcut for sending a single DTMF keypad
+            entry. Equivalent to ``buttons=[button]``. If both ``buttons``
+            and ``button`` are provided, ``buttons`` takes precedence.
+        buttons: Sequence of one or more DTMF keypad buttons to send. Use
+            :meth:`from_string` to build this from a string like ``"123#"``.
     """
 
+    button: KeypadEntry | None = None
+    buttons: list[KeypadEntry] | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.buttons is None and self.button is not None:
+            self.buttons = [self.button]
+        if not self.buttons:
+            raise ValueError(f"{self.__class__.__name__} requires `buttons` or `button` to be set")
+
     def __str__(self):
-        return f"{self.name}(tone: {self.button})"
+        return f"{self.name}(buttons: {self.to_string()})"
+
+    @classmethod
+    def from_string(cls, buttons: str, **kwargs) -> OutputDTMFFrame:
+        """Build an ``OutputDTMFFrame`` from a string of DTMF characters.
+
+        Args:
+            buttons: A string like ``"123#"``. Each character must be a
+                valid :class:`~pipecat.audio.dtmf.types.KeypadEntry` value.
+            **kwargs: Additional keyword arguments forwarded to the frame
+                constructor.
+
+        Returns:
+            A frame of type ``cls`` with ``buttons`` populated as a list of
+            :class:`~pipecat.audio.dtmf.types.KeypadEntry`.
+        """
+        return cls(buttons=[KeypadEntry(c) for c in buttons], **kwargs)
+
+    def to_string(self) -> str:
+        """Return the frame's ``buttons`` as a dial string.
+
+        Returns:
+            A string such as ``"123#"`` formed by concatenating the values
+            of each :class:`~pipecat.audio.dtmf.types.KeypadEntry` in
+            ``buttons``, or an empty string if ``buttons`` is not set.
+        """
+        return "".join(b.value for b in self.buttons) if self.buttons else ""
 
 
 #
@@ -804,7 +839,7 @@ class StartFrame(SystemFrame):
     enable_tracing: bool = False
     enable_usage_metrics: bool = False
     report_only_initial_ttfb: bool = False
-    tracing_context: Optional["TracingContext"] = None
+    tracing_context: TracingContext | None = None
 
 
 @dataclass
@@ -818,7 +853,7 @@ class CancelFrame(SystemFrame):
         reason: Optional reason for pushing a cancel frame.
     """
 
-    reason: Optional[Any] = None
+    reason: Any | None = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -841,8 +876,8 @@ class ErrorFrame(SystemFrame):
 
     error: str
     fatal: bool = False
-    processor: Optional["FrameProcessor"] = None
-    exception: Optional[Exception] = None
+    processor: FrameProcessor | None = None
+    exception: Exception | None = None
 
     def __str__(self):
         return f"{self.name}(error: {self.error}, fatal: {self.fatal})"
@@ -875,7 +910,7 @@ class FrameProcessorPauseUrgentFrame(SystemFrame):
         processor: The frame processor to pause.
     """
 
-    processor: "FrameProcessor"
+    processor: FrameProcessor
 
 
 @dataclass
@@ -890,7 +925,7 @@ class FrameProcessorResumeUrgentFrame(SystemFrame):
         processor: The frame processor to resume.
     """
 
-    processor: "FrameProcessor"
+    processor: FrameProcessor
 
 
 @dataclass
@@ -1060,7 +1095,7 @@ class MetricsFrame(SystemFrame):
         data: List of metrics data collected by the processor.
     """
 
-    data: List[MetricsData]
+    data: list[MetricsData]
 
 
 @dataclass
@@ -1166,12 +1201,12 @@ class UserImageRequestFrame(SystemFrame):
     """
 
     user_id: str
-    text: Optional[str] = None
-    append_to_context: Optional[bool] = None
-    video_source: Optional[str] = None
-    function_name: Optional[str] = None
-    tool_call_id: Optional[str] = None
-    result_callback: Optional[Any] = None
+    text: str | None = None
+    append_to_context: bool | None = None
+    video_source: str | None = None
+    function_name: str | None = None
+    tool_call_id: str | None = None
+    result_callback: Any | None = None
 
     def __str__(self):
         return f"{self.name}(user: {self.user_id}, text: {self.text}, append_to_context: {self.append_to_context}, {self.video_source})"
@@ -1254,9 +1289,9 @@ class UserImageRawFrame(InputImageRawFrame):
     """
 
     user_id: str = ""
-    text: Optional[str] = None
-    append_to_context: Optional[bool] = None
-    request: Optional[UserImageRequestFrame] = None
+    text: str | None = None
+    append_to_context: bool | None = None
+    request: UserImageRequestFrame | None = None
 
     def __str__(self):
         pts = format_pts(self.pts)
@@ -1276,13 +1311,19 @@ class AssistantImageRawFrame(OutputImageRawFrame):
         original_mime_type: The MIME type of the original image data.
     """
 
-    original_data: Optional[bytes] = None
-    original_mime_type: Optional[str] = None
+    original_data: bytes | None = None
+    original_mime_type: str | None = None
 
 
 @dataclass
 class InputDTMFFrame(DTMFFrame, SystemFrame):
-    """DTMF keypress input frame from transport."""
+    """DTMF keypress input frame from transport.
+
+    Parameters:
+        button: The DTMF keypad entry that was pressed.
+    """
+
+    button: KeypadEntry
 
     def __str__(self):
         return f"{self.name}(tone: {self.button.value})"
@@ -1292,12 +1333,52 @@ class InputDTMFFrame(DTMFFrame, SystemFrame):
 class OutputDTMFUrgentFrame(DTMFFrame, SystemFrame):
     """DTMF keypress output frame for immediate sending.
 
-    A DTMF keypress output that will be sent right away. If your transport
-    supports multiple dial-out destinations, use the `transport_destination`
-    field to specify where the DTMF keypress should be sent.
+    Parameters:
+        button: Convenience shortcut for sending a single DTMF keypad
+            entry. Equivalent to ``buttons=[button]``. If both ``buttons``
+            and ``button`` are provided, ``buttons`` takes precedence.
+        buttons: Sequence of one or more DTMF keypad buttons to send. Use
+            :meth:`from_string` to build this from a string like ``"123#"``.
     """
 
-    pass
+    button: KeypadEntry | None = None
+    buttons: list[KeypadEntry] | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.buttons is None and self.button is not None:
+            self.buttons = [self.button]
+        if not self.buttons:
+            raise ValueError(f"{self.__class__.__name__} requires `buttons` or `button` to be set")
+
+    def __str__(self):
+        return f"{self.name}(buttons: {self.to_string()})"
+
+    @classmethod
+    def from_string(cls, buttons: str, **kwargs) -> OutputDTMFUrgentFrame:
+        """Build an ``OutputDTMFUrgentFrame`` from a string of DTMF characters.
+
+        Args:
+            buttons: A string like ``"123#"``. Each character must be a
+                valid :class:`~pipecat.audio.dtmf.types.KeypadEntry` value.
+            **kwargs: Additional keyword arguments forwarded to the frame
+                constructor.
+
+        Returns:
+            A frame of type ``cls`` with ``buttons`` populated as a list of
+            :class:`~pipecat.audio.dtmf.types.KeypadEntry`.
+        """
+        return cls(buttons=[KeypadEntry(c) for c in buttons], **kwargs)
+
+    def to_string(self) -> str:
+        """Return the frame's ``buttons`` as a dial string.
+
+        Returns:
+            A string such as ``"123#"`` formed by concatenating the values
+            of each :class:`~pipecat.audio.dtmf.types.KeypadEntry` in
+            ``buttons``, or an empty string if ``buttons`` is not set.
+        """
+        return "".join(b.value for b in self.buttons) if self.buttons else ""
 
 
 @dataclass
@@ -1313,8 +1394,8 @@ class SpeechControlParamsFrame(SystemFrame):
         turn_params: Current turn-taking analysis parameters.
     """
 
-    vad_params: Optional[VADParams] = None
-    turn_params: Optional[BaseTurnParams] = None
+    vad_params: VADParams | None = None
+    turn_params: BaseTurnParams | None = None
 
 
 @dataclass
@@ -1360,7 +1441,7 @@ class ServiceSwitcherRequestMetadataFrame(ControlFrame):
         service: The target service that should re-emit its metadata.
     """
 
-    service: "FrameProcessor"
+    service: FrameProcessor
 
 
 #
@@ -1408,7 +1489,7 @@ class EndTaskFrame(TaskFrame, UninterruptibleFrame):
         reason: Optional reason for pushing an end frame.
     """
 
-    reason: Optional[Any] = None
+    reason: Any | None = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -1439,7 +1520,7 @@ class CancelTaskFrame(TaskSystemFrame):
         reason: Optional reason for pushing a cancel frame.
     """
 
-    reason: Optional[Any] = None
+    reason: Any | None = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -1480,7 +1561,7 @@ class EndFrame(ControlFrame, UninterruptibleFrame):
         reason: Optional reason for pushing an end frame.
     """
 
-    reason: Optional[Any] = None
+    reason: Any | None = None
 
     def __str__(self):
         return f"{self.name}(reason: {self.reason})"
@@ -1562,7 +1643,7 @@ class FrameProcessorPauseFrame(ControlFrame):
         processor: The frame processor to pause.
     """
 
-    processor: "FrameProcessor"
+    processor: FrameProcessor
 
 
 @dataclass
@@ -1577,7 +1658,7 @@ class FrameProcessorResumeFrame(ControlFrame):
         processor: The frame processor to resume.
     """
 
-    processor: "FrameProcessor"
+    processor: FrameProcessor
 
 
 @dataclass
@@ -1588,7 +1669,7 @@ class LLMFullResponseStartFrame(ControlFrame):
     more TextFrames and a final LLMFullResponseEndFrame.
     """
 
-    skip_tts: Optional[bool] = field(init=False)
+    skip_tts: bool | None = field(init=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -1599,7 +1680,7 @@ class LLMFullResponseStartFrame(ControlFrame):
 class LLMFullResponseEndFrame(ControlFrame):
     """Frame indicating the end of an LLM response."""
 
-    skip_tts: Optional[bool] = field(init=False)
+    skip_tts: bool | None = field(init=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -1629,7 +1710,7 @@ class LLMSummarizeContextFrame(ControlFrame):
             is used.
     """
 
-    config: Optional["LLMContextSummaryConfig"] = None
+    config: LLMContextSummaryConfig | None = None
 
 
 @dataclass
@@ -1656,11 +1737,11 @@ class LLMContextSummaryRequestFrame(ControlFrame):
     """
 
     request_id: str
-    context: "LLMContext"
+    context: LLMContext
     min_messages_to_keep: int
     target_context_tokens: int
     summarization_prompt: str
-    summarization_timeout: Optional[float] = None
+    summarization_timeout: float | None = None
 
 
 @dataclass
@@ -1682,7 +1763,7 @@ class LLMContextSummaryResultFrame(ControlFrame, UninterruptibleFrame):
     request_id: str
     summary: str
     last_summarized_index: int
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -1709,7 +1790,7 @@ class FunctionCallInProgressFrame(ControlFrame, UninterruptibleFrame):
     tool_call_id: str
     arguments: Any
     cancel_on_interruption: bool = False
-    group_id: Optional[str] = None
+    group_id: str | None = None
 
 
 @dataclass
@@ -1745,7 +1826,7 @@ class TTSStartedFrame(ControlFrame):
         context_id: Unique identifier for this TTS context.
     """
 
-    context_id: Optional[str] = None
+    context_id: str | None = None
 
 
 @dataclass
@@ -1756,7 +1837,7 @@ class TTSStoppedFrame(ControlFrame):
         context_id: Unique identifier for this TTS context.
     """
 
-    context_id: Optional[str] = None
+    context_id: str | None = None
 
 
 @dataclass
@@ -1781,8 +1862,8 @@ class ServiceUpdateSettingsFrame(ControlFrame, UninterruptibleFrame):
     """
 
     settings: Mapping[str, Any] = field(default_factory=dict)
-    delta: Optional["ServiceSettings"] = None
-    service: Optional["FrameProcessor"] = None
+    delta: ServiceSettings | None = None
+    service: FrameProcessor | None = None
 
 
 @dataclass
@@ -1906,4 +1987,4 @@ class ManuallySwitchServiceFrame(ServiceSwitcherFrame):
     Handled by ServiceSwitcherStrategyManual to switch the active service.
     """
 
-    service: "FrameProcessor"
+    service: FrameProcessor

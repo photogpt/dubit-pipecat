@@ -13,10 +13,9 @@ function calling.
 
 import asyncio
 import json
-import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -36,8 +35,9 @@ from pipecat.frames.frames import (
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.services.aws.utils import resolve_credentials
 from pipecat.services.llm_service import LLMService
-from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven, assert_given
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 try:
@@ -66,15 +66,15 @@ class AWSBedrockLLMSettings(LLMSettings):
         additional_model_request_fields: Additional model-specific parameters.
     """
 
-    stop_sequences: List[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    latency: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    stop_sequences: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    latency: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     enable_prompt_caching: bool | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    additional_model_request_fields: Dict[str, Any] | _NotGiven = field(
+    additional_model_request_fields: dict[str, Any] | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
 
 
-class AWSBedrockLLMService(LLMService):
+class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
     """AWS Bedrock Large Language Model service implementation.
 
     Provides inference capabilities for AWS Bedrock models including Amazon Nova
@@ -104,27 +104,27 @@ class AWSBedrockLLMService(LLMService):
             additional_model_request_fields: Additional model-specific parameters.
         """
 
-        max_tokens: Optional[int] = Field(default=None, ge=1)
-        temperature: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-        top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-        stop_sequences: Optional[List[str]] = Field(default_factory=lambda: [])
-        latency: Optional[str] = Field(default=None)
-        additional_model_request_fields: Optional[Dict[str, Any]] = Field(default_factory=dict)
+        max_tokens: int | None = Field(default=None, ge=1)
+        temperature: float | None = Field(default=None, ge=0.0, le=1.0)
+        top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+        stop_sequences: list[str] | None = Field(default_factory=lambda: [])
+        latency: str | None = Field(default=None)
+        additional_model_request_fields: dict[str, Any] | None = Field(default_factory=dict)
 
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
-        aws_access_key: Optional[str] = None,
-        aws_secret_key: Optional[str] = None,
-        aws_session_token: Optional[str] = None,
-        aws_region: Optional[str] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
-        stop_sequences: Optional[List[str]] = None,
-        client_config: Optional[Config] = None,
-        retry_timeout_secs: Optional[float] = 5.0,
-        retry_on_timeout: Optional[bool] = False,
+        model: str | None = None,
+        aws_access_key: str | None = None,
+        aws_secret_key: str | None = None,
+        aws_session_token: str | None = None,
+        aws_region: str | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
+        stop_sequences: list[str] | None = None,
+        client_config: Config | None = None,
+        retry_timeout_secs: float | None = 5.0,
+        retry_on_timeout: bool | None = False,
         **kwargs,
     ):
         """Initialize the AWS Bedrock LLM service.
@@ -135,8 +135,11 @@ class AWSBedrockLLMService(LLMService):
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSBedrockLLMService.Settings(model=...)`` instead.
 
-            aws_access_key: AWS access key ID. If None, uses default credentials.
-            aws_secret_key: AWS secret access key. If None, uses default credentials.
+            aws_access_key: AWS access key ID. If None, falls back to
+                environment variables and the default boto3 credential chain
+                (instance profiles, IRSA, ECS task roles, SSO, etc.).
+            aws_secret_key: AWS secret access key. Same fallback behaviour as
+                ``aws_access_key``.
             aws_session_token: AWS session token for temporary credentials.
             aws_region: AWS region for the Bedrock service.
             params: Model parameters and configuration.
@@ -215,14 +218,14 @@ class AWSBedrockLLMService(LLMService):
 
         self._aws_session = aioboto3.Session()
 
-        # Store AWS session parameters for creating client in async context
-        self._aws_params = {
-            "aws_access_key_id": aws_access_key or os.getenv("AWS_ACCESS_KEY_ID"),
-            "aws_secret_access_key": aws_secret_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
-            "aws_session_token": aws_session_token or os.getenv("AWS_SESSION_TOKEN"),
-            "region_name": aws_region or os.getenv("AWS_REGION", "us-east-1"),
-            "config": client_config,
-        }
+        # Resolve credentials using the shared chain (explicit → env → boto3).
+        resolved = resolve_credentials(
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+            aws_session_token=aws_session_token,
+            region=aws_region,
+        )
+        self._aws_params = {**resolved.to_boto_kwargs(), "config": client_config}
 
         self._retry_timeout_secs = retry_timeout_secs
         self._retry_on_timeout = retry_on_timeout
@@ -239,7 +242,7 @@ class AWSBedrockLLMService(LLMService):
         """
         return True
 
-    def _build_inference_config(self) -> Dict[str, Any]:
+    def _build_inference_config(self) -> dict[str, Any]:
         """Build inference config with only the parameters that are set.
 
         This prevents conflicts with models (e.g., Claude Sonnet 4.5) that don't
@@ -262,9 +265,9 @@ class AWSBedrockLLMService(LLMService):
     async def run_inference(
         self,
         context: LLMContext,
-        max_tokens: Optional[int] = None,
-        system_instruction: Optional[str] = None,
-    ) -> Optional[str]:
+        max_tokens: int | None = None,
+        system_instruction: str | None = None,
+    ) -> str | None:
         """Run a one-shot, out-of-band (i.e. out-of-pipeline) inference with the given LLM context.
 
         Args:
@@ -279,9 +282,11 @@ class AWSBedrockLLMService(LLMService):
         """
         messages = []
         system = []
-        effective_instruction = system_instruction or self._settings.system_instruction
-        adapter: AWSBedrockLLMAdapter = self.get_llm_adapter()
-        params: AWSBedrockLLMInvocationParams = adapter.get_llm_invocation_params(
+        effective_instruction = system_instruction or assert_given(
+            self._settings.system_instruction
+        )
+        adapter = self.get_llm_adapter()
+        params = adapter.get_llm_invocation_params(
             context, system_instruction=effective_instruction
         )
         messages = params["messages"]
@@ -344,7 +349,7 @@ class AWSBedrockLLMService(LLMService):
                     client.converse_stream(**request_params), timeout=self._retry_timeout_secs
                 )
                 return response
-            except (ReadTimeoutError, asyncio.TimeoutError) as e:
+            except (TimeoutError, ReadTimeoutError) as e:
                 # Retry, this time without a timeout so we get a response
                 logger.debug(f"{self}: Retrying converse_stream due to timeout")
                 response = await client.converse_stream(**request_params)
@@ -369,9 +374,9 @@ class AWSBedrockLLMService(LLMService):
         }
 
     def _get_llm_invocation_params(self, context: LLMContext) -> AWSBedrockLLMInvocationParams:
-        adapter: AWSBedrockLLMAdapter = self.get_llm_adapter()
-        params: AWSBedrockLLMInvocationParams = adapter.get_llm_invocation_params(
-            context, system_instruction=self._settings.system_instruction
+        adapter = self.get_llm_adapter()
+        params = adapter.get_llm_invocation_params(
+            context, system_instruction=assert_given(self._settings.system_instruction)
         )
         return params
 
@@ -475,9 +480,7 @@ class AWSBedrockLLMService(LLMService):
             # Log request params with messages redacted for logging
             adapter = self.get_llm_adapter()
             messages_for_logging = adapter.get_messages_for_logging(context)
-            logger.debug(
-                f"{self}: Generating chat from context [{system}] | {messages_for_logging}"
-            )
+            logger.debug(f"{self}: Generating chat from context {messages_for_logging}")
 
             async with self._aws_session.client(
                 service_name="bedrock-runtime", **self._aws_params
@@ -553,7 +556,7 @@ class AWSBedrockLLMService(LLMService):
             # also get cancelled.
             use_completion_tokens_estimate = True
             raise
-        except (ReadTimeoutError, asyncio.TimeoutError):
+        except (TimeoutError, ReadTimeoutError):
             await self._call_event_handler("on_completion_timeout")
         except Exception as e:
             await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)

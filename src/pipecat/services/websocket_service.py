@@ -9,7 +9,7 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
 
 import websockets
 from loguru import logger
@@ -42,7 +42,7 @@ class WebsocketService(ABC):
             reconnect_on_error: Whether to automatically reconnect on connection errors.
             **kwargs: Additional arguments (unused, for compatibility).
         """
-        self._websocket: Optional[websockets.WebSocketClientProtocol] = None
+        self._websocket: websockets.WebSocketClientProtocol | None = None  # pyright: ignore[reportAttributeAccessIssue]
         self._reconnect_on_error = reconnect_on_error
         self._reconnect_in_progress: bool = False
         self._disconnecting: bool = False
@@ -81,7 +81,7 @@ class WebsocketService(ABC):
     async def _try_reconnect(
         self,
         max_retries: int = 3,
-        report_error: Optional[Callable[[ErrorFrame], Awaitable[None]]] = None,
+        report_error: Callable[[ErrorFrame], Awaitable[None]] | None = None,
     ) -> bool:
         # Prevent concurrent reconnection attempts
         if self._reconnect_in_progress:
@@ -89,7 +89,7 @@ class WebsocketService(ABC):
             return False
 
         self._reconnect_in_progress = True
-        last_exception: Optional[Exception] = None
+        last_exception: Exception | None = None
         try:
             for attempt in range(1, max_retries + 1):
                 try:
@@ -120,12 +120,17 @@ class WebsocketService(ABC):
     async def send_with_retry(self, message, report_error: Callable[[ErrorFrame], Awaitable[None]]):
         """Attempt to send a message, retrying after reconnect if necessary."""
         try:
+            # If websocket isn't connected/present, treat as a send failure —
+            # the broad `except Exception` below will trigger a reconnect
+            # attempt.
+            if self._websocket is None:
+                raise ConnectionError(f"{self} no websocket connected")
             await self._websocket.send(message)
         except Exception as e:
             logger.error(f"{self} send failed: {e}, will try to reconnect")
             # Try to reconnect before retrying
             success = await self._try_reconnect(report_error=report_error)
-            if success:
+            if success and self._websocket is not None:
                 logger.info(f"{self} reconnected successfully, will retry send the message")
                 # trying to send the message one more time
                 await self._websocket.send(message)
@@ -136,7 +141,7 @@ class WebsocketService(ABC):
         self,
         error_message: str,
         report_error: Callable[[ErrorFrame], Awaitable[None]],
-        error: Optional[Exception] = None,
+        error: Exception | None = None,
     ) -> bool:
         """Check if reconnection should be attempted and try if appropriate.
 

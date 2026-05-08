@@ -8,8 +8,8 @@
 
 import asyncio
 import re
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, Optional
 
 from loguru import logger
 from pydantic import BaseModel
@@ -26,7 +26,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.azure.common import language_to_azure_language
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TextAggregationMode, TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -81,13 +81,13 @@ class AzureTTSSettings(TTSSettings):
         volume: Volume level (e.g., "+20%", "loud", "x-soft").
     """
 
-    emphasis: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    pitch: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    rate: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    role: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    style: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    style_degree: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    volume: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    emphasis: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    pitch: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    rate: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    role: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    style: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    style_degree: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    volume: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class AzureBaseTTSService:
@@ -128,14 +128,14 @@ class AzureBaseTTSService:
             volume: Volume level (e.g., "+20%", "loud", "x-soft").
         """
 
-        emphasis: Optional[str] = None
-        language: Optional[Language] = Language.EN_US
-        pitch: Optional[str] = None
-        rate: Optional[str] = None
-        role: Optional[str] = None
-        style: Optional[str] = None
-        style_degree: Optional[str] = None
-        volume: Optional[str] = None
+        emphasis: str | None = None
+        language: Language | None = Language.EN_US
+        pitch: str | None = None
+        rate: str | None = None
+        role: str | None = None
+        style: str | None = None
+        style_degree: str | None = None
+        volume: str | None = None
 
     def _init_azure_base(
         self,
@@ -155,7 +155,7 @@ class AzureBaseTTSService:
         self._region = region
         self._speech_synthesizer = None
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Azure language format.
 
         Args:
@@ -219,7 +219,7 @@ class AzureBaseTTSService:
         return ssml
 
     def _escape_text_with_tag_support(
-        self, text: str, tag_pairs: Optional[list[tuple[str, str]]] = None
+        self, text: str, tag_pairs: list[tuple[str, str]] | None = None
     ) -> str:
         """Escape text while preserving configured SSML tag pairs."""
         if not text:
@@ -311,12 +311,12 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         *,
         api_key: str,
         region: str,
-        voice: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        params: Optional[AzureBaseTTSService.InputParams] = None,
-        settings: Optional[Settings] = None,
-        aggregate_sentences: Optional[bool] = None,
-        text_aggregation_mode: Optional[TextAggregationMode] = None,
+        voice: str | None = None,
+        sample_rate: int | None = None,
+        params: AzureBaseTTSService.InputParams | None = None,
+        settings: Settings | None = None,
+        aggregate_sentences: bool | None = None,
+        text_aggregation_mode: TextAggregationMode | None = None,
         **kwargs,
     ):
         """Initialize the Azure streaming TTS service.
@@ -407,11 +407,9 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         self._current_sentence_max_word_offset: float = (
             0.0  # Max word boundary offset seen in current sentence (for 8kHz workaround)
         )
-        self._last_word: Optional[str] = None  # Track last word for punctuation merging
-        self._last_timestamp: Optional[float] = None  # Track last timestamp
-        self._current_context_id: Optional[str] = (
-            None  # Track current context_id for word timestamps
-        )
+        self._last_word: str | None = None  # Track last word for punctuation merging
+        self._last_timestamp: float | None = None  # Track last timestamp
+        self._current_context_id: str | None = None  # Track current context_id for word timestamps
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -487,7 +485,7 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         Returns:
             True if the language is CJK, False otherwise.
         """
-        language = (self._settings.language if self._settings.language else "").lower()
+        language = (assert_given(self._settings.language) or "").lower()
         # Check if language starts with CJK language codes
         return language.startswith(("zh", "ja", "ko", "cmn", "yue", "wuu"))
 
@@ -679,7 +677,7 @@ class AzureTTSService(TTSService, AzureBaseTTSService):
         self._last_timestamp = None
         self._current_context_id = None
 
-    async def flush_audio(self, context_id: Optional[str] = None):
+    async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio data."""
         logger.trace(f"{self}: flushing audio")
 
@@ -810,10 +808,10 @@ class AzureHttpTTSService(TTSService, AzureBaseTTSService):
         *,
         api_key: str,
         region: str,
-        voice: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        params: Optional[AzureBaseTTSService.InputParams] = None,
-        settings: Optional[Settings] = None,
+        voice: str | None = None,
+        sample_rate: int | None = None,
+        params: AzureBaseTTSService.InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Azure HTTP TTS service.

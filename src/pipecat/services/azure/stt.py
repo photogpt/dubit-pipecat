@@ -11,8 +11,9 @@ Speech SDK for real-time audio transcription.
 """
 
 import asyncio
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, cast
 
 from loguru import logger
 
@@ -26,7 +27,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
 )
 from pipecat.services.azure.common import language_to_azure_language
-from pipecat.services.settings import STTSettings
+from pipecat.services.settings import STTSettings, assert_given
 from pipecat.services.stt_latency import AZURE_TTFS_P99
 from pipecat.services.stt_service import STTService
 from pipecat.transcriptions.language import Language
@@ -73,15 +74,15 @@ class AzureSTTService(STTService):
         self,
         *,
         api_key: str,
-        region: Optional[str] = None,
-        language: Optional[Language | str] = Language.EN_US,
-        language_code: Optional[str] = None,
-        sample_rate: Optional[int] = None,
+        region: str | None = None,
+        language: Language | str | None = Language.EN_US,
+        language_code: str | None = None,
+        sample_rate: int | None = None,
         vad_enabled: bool = False,
-        private_endpoint: Optional[str] = None,
-        endpoint_id: Optional[str] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = AZURE_TTFS_P99,
+        private_endpoint: str | None = None,
+        endpoint_id: str | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = AZURE_TTFS_P99,
         **kwargs,
     ):
         """Initialize the Azure STT service.
@@ -138,9 +139,9 @@ class AzureSTTService(STTService):
         )
         self.vad_enabled = vad_enabled
 
-        recognition_language = default_settings.language or language_to_azure_language(
-            Language.EN_US
-        )
+        recognition_language = assert_given(
+            default_settings.language
+        ) or language_to_azure_language(Language.EN_US)
 
         if not region and not private_endpoint:
             raise ValueError("Either 'region' or 'private_endpoint' must be provided.")
@@ -176,7 +177,7 @@ class AzureSTTService(STTService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Azure service-specific language code.
 
         Args:
@@ -192,16 +193,16 @@ class AzureSTTService(STTService):
         changed = await super()._update_settings(delta)
 
         if "language" in changed:
-            self._speech_config.speech_recognition_language = (
-                self._settings.language or language_to_azure_language(Language.EN_US)
-            )
+            self._speech_config.speech_recognition_language = assert_given(
+                self._settings.language
+            ) or language_to_azure_language(Language.EN_US)
             if self._audio_stream:
                 await self._disconnect()
                 await self._connect()
 
         return changed
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Process audio data for speech-to-text conversion.
 
         Feeds audio data to the Azure speech recognizer for processing.
@@ -283,14 +284,19 @@ class AzureSTTService(STTService):
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         await self.stop_processing_metrics()
 
     def _on_handle_recognized(self, event):
         if event.result.reason == ResultReason.RecognizedSpeech and len(event.result.text) > 0:
-            language = getattr(event.result, "language", None) or self._settings.language
+            # Technically either source could be a raw string, but Language is
+            # a StrEnum so downstream handles either.
+            language = cast(
+                "Language | None",
+                getattr(event.result, "language", None) or assert_given(self._settings.language),
+            )
             frame = TranscriptionFrame(
                 event.result.text,
                 self._user_id,
@@ -310,7 +316,12 @@ class AzureSTTService(STTService):
 
     def _on_handle_recognizing(self, event):
         if event.result.reason == ResultReason.RecognizingSpeech and len(event.result.text) > 0:
-            language = getattr(event.result, "language", None) or self._settings.language
+            # Technically either source could be a raw string, but Language is
+            # a StrEnum so downstream handles either.
+            language = cast(
+                "Language | None",
+                getattr(event.result, "language", None) or assert_given(self._settings.language),
+            )
             frame = InterimTranscriptionFrame(
                 event.result.text,
                 self._user_id,

@@ -13,8 +13,9 @@ output processing, including frame buffering, mixing, timing, and media streamin
 import asyncio
 import itertools
 import time
+from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional
+from typing import Any
 
 from loguru import logger
 from PIL import Image
@@ -87,7 +88,19 @@ class BaseOutputTransport(FrameProcessor):
         # We will have one media sender per output frame destination. This allow
         # us to send multiple streams at the same time if the transport allows
         # it.
-        self._media_senders: Dict[Any, "BaseOutputTransport.MediaSender"] = {}
+        self._media_senders: dict[Any, BaseOutputTransport.MediaSender] = {}
+
+        if params.video_out_bitrate is not None:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(
+                    "Transport parameter `video_out_bitrate` is deprecated and will be removed in a future "
+                    "version. Use provider specific settings instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
 
     @property
     def sample_rate(self) -> int:
@@ -275,11 +288,14 @@ class BaseOutputTransport(FrameProcessor):
         Args:
             frame: The DTMF frame to write.
         """
-        dtmf_audio = await load_dtmf_audio(frame.button, sample_rate=self._sample_rate)
-        dtmf_audio_frame = OutputAudioRawFrame(
-            audio=dtmf_audio, sample_rate=self._sample_rate, num_channels=1
-        )
-        await self.write_audio_frame(dtmf_audio_frame)
+        if not frame.buttons:
+            return
+        for button in frame.buttons:
+            dtmf_audio = await load_dtmf_audio(button, sample_rate=self._sample_rate)
+            dtmf_audio_frame = OutputAudioRawFrame(
+                audio=dtmf_audio, sample_rate=self._sample_rate, num_channels=1
+            )
+            await self.write_audio_frame(dtmf_audio_frame)
 
     async def send_audio(self, frame: OutputAudioRawFrame):
         """Send an audio frame downstream.
@@ -380,7 +396,7 @@ class BaseOutputTransport(FrameProcessor):
             self,
             transport: "BaseOutputTransport",
             *,
-            destination: Optional[str],
+            destination: str | None,
             sample_rate: int,
             audio_chunk_size: int,
             params: TransportParams,
@@ -411,7 +427,7 @@ class BaseOutputTransport(FrameProcessor):
 
             # The user can provide a single mixer, to be used by the default
             # destination, or a destination/mixer mapping.
-            self._mixer: Optional[BaseAudioMixer] = None
+            self._mixer: BaseAudioMixer | None = None
 
             # These are the images that we should send at our desired framerate.
             self._video_images = None
@@ -428,9 +444,9 @@ class BaseOutputTransport(FrameProcessor):
             # Last time the bot actually spoke.
             self._bot_speech_last_time = 0
 
-            self._audio_task: Optional[asyncio.Task] = None
-            self._video_task: Optional[asyncio.Task] = None
-            self._clock_task: Optional[asyncio.Task] = None
+            self._audio_task: asyncio.Task | None = None
+            self._video_task: asyncio.Task | None = None
+            self._clock_task: asyncio.Task | None = None
 
         @property
         def sample_rate(self) -> int:
@@ -750,18 +766,21 @@ class BaseOutputTransport(FrameProcessor):
                         )
                         yield frame
                         self._audio_queue.task_done()
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Fallback: notify the bot stopped speaking upstream if necessary based on timeout.
                         await self._bot_stopped_speaking()
 
             async def with_mixer(vad_stop_secs: float) -> AsyncGenerator[Frame, None]:
+                # Caller below only invokes this when `self._mixer` is set.
+                mixer = self._mixer
+                assert mixer is not None
                 last_frame_time = 0
                 silence = b"\x00" * self._audio_chunk_size
                 while True:
                     try:
                         frame = self._audio_queue.get_nowait()
                         if isinstance(frame, OutputAudioRawFrame):
-                            frame.audio = await self._mixer.mix(frame.audio)
+                            frame.audio = await mixer.mix(frame.audio)
                             last_frame_time = time.time()
                         yield frame
                         self._audio_queue.task_done()
@@ -772,7 +791,7 @@ class BaseOutputTransport(FrameProcessor):
                             await self._bot_stopped_speaking()
                         # Generate an audio frame with only the mixer's part.
                         frame = OutputAudioRawFrame(
-                            audio=await self._mixer.mix(silence),
+                            audio=await mixer.mix(silence),
                             sample_rate=self._sample_rate,
                             num_channels=self._params.audio_out_channels,
                         )
@@ -853,7 +872,7 @@ class BaseOutputTransport(FrameProcessor):
             """
             self._video_images = itertools.cycle([image])
 
-        async def _set_video_images(self, images: List[OutputImageRawFrame]):
+        async def _set_video_images(self, images: list[OutputImageRawFrame]):
             """Set multiple video images for cycling output.
 
             Args:
@@ -911,6 +930,11 @@ class BaseOutputTransport(FrameProcessor):
             """
 
             def resize_frame(frame: OutputImageRawFrame) -> OutputImageRawFrame:
+                # Without a format we can't decode the bytes, so leave the
+                # frame as-is and let the transport pass it through unchanged.
+                if frame.format is None:
+                    return frame
+
                 desired_size = (self._params.video_out_width, self._params.video_out_height)
 
                 # TODO: we should refactor in the future to support dynamic resolutions

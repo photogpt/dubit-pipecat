@@ -9,7 +9,7 @@
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict, cast
 
 from loguru import logger
 
@@ -26,9 +26,9 @@ class OpenAIRealtimeLLMInvocationParams(TypedDict):
     This is a placeholder until support for universal LLMContext machinery is added for OpenAI Realtime.
     """
 
-    system_instruction: Optional[str]
-    messages: List[events.ConversationItem]
-    tools: List[Dict[str, Any]]
+    system_instruction: str | None
+    messages: list[events.ConversationItem]
+    tools: list[dict[str, Any]]
 
 
 class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
@@ -44,7 +44,7 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
         return "openai-realtime"
 
     def get_llm_invocation_params(
-        self, context: LLMContext, *, system_instruction: Optional[str] = None
+        self, context: LLMContext, *, system_instruction: str | None = None
     ) -> OpenAIRealtimeLLMInvocationParams:
         """Get OpenAI Realtime-specific LLM invocation parameters from a universal LLM context.
 
@@ -68,7 +68,7 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
             "tools": self.from_standard_tools(context.tools) or [],
         }
 
-    def get_messages_for_logging(self, context) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about OpenAI Realtime.
 
         Binary data (images, audio) is replaced with short placeholders.
@@ -81,17 +81,17 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
         Returns:
             List of messages in a format ready for logging about OpenAI Realtime.
         """
-        return self.get_messages(context, truncate_large_values=True)
+        return cast(list[dict[str, Any]], self.get_messages(context, truncate_large_values=True))
 
     @dataclass
     class ConvertedMessages:
         """Container for OpenAI-formatted messages converted from universal context."""
 
-        messages: List[events.ConversationItem]
-        system_instruction: Optional[str] = None
+        messages: list[events.ConversationItem]
+        system_instruction: str | None = None
 
     def _from_universal_context_messages(
-        self, universal_context_messages: List[LLMContextMessage]
+        self, universal_context_messages: list[LLMContextMessage]
     ) -> ConvertedMessages:
         # We can't load a long conversation history into the openai realtime api yet. (The API/model
         # forgets that it can do audio, if you do a series of `conversation.item.create` calls.) So
@@ -101,12 +101,24 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
         if not universal_context_messages:
             return self.ConvertedMessages(messages=[])
 
-        messages = copy.deepcopy(universal_context_messages)
+        # NOTE: This adapter does not yet handle ``LLMSpecificMessage`` — those
+        # are filtered out below. Other adapters (e.g. Anthropic) dispatch
+        # LLMSpecific items through a per-provider passthrough. For OpenAI
+        # Realtime, the strategy here packs a multi-message history into a
+        # single text message (see comment further down), which doesn't
+        # compose with opaque per-provider payloads. If/when this adapter
+        # adopts the per-message strategy, LLMSpecific items can flow
+        # through `_from_universal_context_message` like in other adapters.
+        messages: list[dict[str, Any]] = [
+            cast(dict[str, Any], m)
+            for m in copy.deepcopy(universal_context_messages)
+            if isinstance(m, dict)
+        ]
         system_instruction = None
 
         # If we have a "system" message as our first message,
         # pull that out into session "instructions"
-        if messages[0].get("role") == "system":
+        if messages and messages[0].get("role") == "system":
             system = messages.pop(0)
             content = system.get("content")
             if isinstance(content, str):
@@ -124,7 +136,9 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
         # If we have just a single "user" item, we can just send it normally
         if len(messages) == 1 and messages[0].get("role") == "user":
             return self.ConvertedMessages(
-                messages=[self._from_universal_context_message(messages[0])],
+                messages=[
+                    self._from_universal_context_message(cast(LLMContextMessage, messages[0]))
+                ],
                 system_instruction=system_instruction,
             )
 
@@ -142,18 +156,18 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
 
         return self.ConvertedMessages(
             messages=[
-                {
-                    "role": "user",
-                    "type": "message",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "\n\n".join(
+                events.ConversationItem(
+                    role="user",
+                    type="message",
+                    content=[
+                        events.ItemContent(
+                            type="input_text",
+                            text="\n\n".join(
                                 [intro_text, json.dumps(messages, indent=2), trailing_text]
                             ),
-                        }
+                        )
                     ],
-                }
+                )
             ],
             system_instruction=system_instruction,
         )
@@ -161,34 +175,37 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
     def _from_universal_context_message(
         self, message: LLMContextMessage
     ) -> events.ConversationItem:
-        if message.get("role") == "user":
-            content = message.get("content")
-            if isinstance(message.get("content"), list):
+        # NOTE: ``LLMSpecificMessage`` is not yet handled here — see the
+        # corresponding note in `_from_universal_context_messages`.
+        msg = cast(dict[str, Any], message)
+        if msg.get("role") == "user":
+            content = msg.get("content")
+            if isinstance(content, list):
                 content = ""
-                for c in message.get("content"):
+                for c in msg.get("content", []):
                     if c.get("type") == "text":
                         content += " " + c.get("text")
                     else:
                         logger.error(
-                            f"Unhandled content type in context message: {c.get('type')} - {message}"
+                            f"Unhandled content type in context message: {c.get('type')} - {msg}"
                         )
             return events.ConversationItem(
                 role="user",
                 type="message",
                 content=[events.ItemContent(type="input_text", text=content)],
             )
-        if message.get("role") == "assistant" and message.get("tool_calls"):
-            tc = message.get("tool_calls")[0]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            tc = msg["tool_calls"][0]
             return events.ConversationItem(
                 type="function_call",
                 call_id=tc["id"],
                 name=tc["function"]["name"],
                 arguments=tc["function"]["arguments"],
             )
-        logger.error(f"Unhandled message type in _from_universal_context_message: {message}")
+        raise ValueError(f"Unhandled message type in _from_universal_context_message: {msg}")
 
     @staticmethod
-    def _to_openai_realtime_function_format(function: FunctionSchema) -> Dict[str, Any]:
+    def _to_openai_realtime_function_format(function: FunctionSchema) -> dict[str, Any]:
         """Convert a function schema to OpenAI Realtime format.
 
         Args:
@@ -208,7 +225,7 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
             },
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert tool schemas to OpenAI Realtime function-calling format.
 
         Args:
