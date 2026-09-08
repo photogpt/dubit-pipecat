@@ -6,7 +6,6 @@
 
 import base64
 import os
-import warnings
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,9 +26,11 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 try:
     from hume import AsyncHumeClient
@@ -37,8 +38,8 @@ try:
     from hume.tts.types import TimestampMessage
 except ModuleNotFoundError as e:  # pragma: no cover - import-time guidance
     logger.error(f"Exception: {e}")
-    logger.error("In order to use Hume, you need to `pip install pipecat-ai[hume]`.")
-    raise Exception(f"Missing module: {e}")
+    logger.error('In order to use Hume, you need to `uv add "pipecat-ai[hume]"`.')
+    raise ImportError(f"Missing module: {e}") from e
 
 
 HUME_SAMPLE_RATE = 48_000  # Hume TTS streams at 48 kHz
@@ -58,11 +59,15 @@ class HumeTTSSettings(TTSSettings):
         description: Natural-language acting directions (up to 100 characters).
         speed: Speaking-rate multiplier (0.5-2.0).
         trailing_silence: Seconds of silence to append at the end (0-5).
+        temperature: Sampling temperature for speech generation. Higher values increase
+            variation, lower values increase consistency. When unset, Hume applies its own
+            per-model default.
     """
 
-    description: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    speed: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    trailing_silence: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    description: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    speed: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    trailing_silence: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    temperature: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class HumeTTSService(TTSService):
@@ -83,11 +88,16 @@ class HumeTTSService(TTSService):
     Settings = HumeTTSSettings
     _settings: Settings
 
+    @deprecated(
+        "`HumeTTSService.InputParams` is deprecated since 0.0.105 and will be removed in 2.0.0. "
+        "Use `HumeTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Optional synthesis parameters for Hume TTS.
 
         .. deprecated:: 0.0.105
             Use ``settings=HumeTTSService.Settings(...)`` instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             description: Natural-language acting directions (up to 100 characters).
@@ -117,11 +127,13 @@ class HumeTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=HumeTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             params: Optional synthesis controls (acting instructions, speed, trailing silence).
 
                 .. deprecated:: 0.0.105
                     Use ``settings=HumeTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Output sample rate for emitted PCM frames. Defaults to 48_000 (Hume).
             settings: Runtime-updatable settings. When provided alongside deprecated
@@ -145,6 +157,7 @@ class HumeTTSService(TTSService):
             description=None,
             speed=None,
             trailing_silence=None,
+            temperature=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -212,8 +225,7 @@ class HumeTTSService(TTSService):
             frame: The end frame.
         """
         await super().stop(frame)
-        if hasattr(self, "_http_client") and self._http_client:
-            await self._http_client.aclose()
+        await self._close_client()
 
     async def cancel(self, frame: CancelFrame) -> None:
         """Cancel the service and cleanup resources.
@@ -222,8 +234,18 @@ class HumeTTSService(TTSService):
             frame: The cancel frame.
         """
         await super().cancel(frame)
-        if hasattr(self, "_http_client") and self._http_client:
+        await self._close_client()
+
+    async def cleanup(self) -> None:
+        """Release resources at pipeline teardown."""
+        await super().cleanup()
+        await self._close_client()
+
+    async def _close_client(self) -> None:
+        """Close the Hume HTTP client. Idempotent."""
+        if self._http_client:
             await self._http_client.aclose()
+            self._http_client = None
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         """Push a frame and handle state changes.
@@ -237,11 +259,16 @@ class HumeTTSService(TTSService):
             # Reset timing on interruption or stop
             self._reset_state()
 
+    @deprecated(
+        "`HumeTTSService.update_setting` is deprecated since 0.0.104 and will be removed in 2.0.0. "
+        "Use `TTSUpdateSettingsFrame` instead."
+    )
     async def update_setting(self, key: str, value: Any) -> None:
         """Runtime updates via key/value pair.
 
         .. deprecated:: 0.0.104
             Use ``TTSUpdateSettingsFrame(delta=HumeTTSService.Settings(...))`` instead.
+            Will be removed in 2.0.0.
 
         Args:
             key: The name of the setting to update. Recognized keys are:
@@ -251,15 +278,6 @@ class HumeTTSService(TTSService):
                 - "trailing_silence"
             value: The new value for the setting.
         """
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "'update_setting' is deprecated, use "
-                "'TTSUpdateSettingsFrame(delta=self.Settings(...))' instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         key_l = (key or "").lower()
         known_keys = {"voice_id", "voice", "description", "speed", "trailing_silence"}
 
@@ -326,12 +344,17 @@ class HumeTTSService(TTSService):
             # Track the duration of this utterance based on the last timestamp
             utterance_duration = 0.0
 
+            request_kwargs: dict[str, Any] = {}
+            if self._settings.temperature is not None:
+                request_kwargs["temperature"] = self._settings.temperature
+
             async for chunk in self._client.tts.synthesize_json_streaming(
                 utterances=[utterance],
                 format=pcm_fmt,
                 instant_mode=True,
                 version=version,
                 include_timestamp_types=["word"],  # Request word-level timestamps
+                **request_kwargs,
             ):
                 # Process audio chunks
                 audio_b64 = getattr(chunk, "audio", None)

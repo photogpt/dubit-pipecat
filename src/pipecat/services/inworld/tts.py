@@ -34,33 +34,55 @@ from pipecat import version as pipecat_version
 
 USER_AGENT = f"pipecat/{pipecat_version()}"
 from pydantic import BaseModel
-
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
-
-try:
-    from websockets.asyncio.client import connect as websocket_connect
-    from websockets.protocol import State
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error("In order to use Inworld WebSocket TTS, you need to `pip install websockets`.")
-    raise Exception(f"Missing module: {e}")
+from websockets.protocol import State
 
 from pipecat.frames.frames import (
     AggregationType,
-    CancelFrame,
-    EndFrame,
     ErrorFrame,
     Frame,
     InterruptionFrame,
-    StartFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
     TTSTextFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TextAggregationMode, TTSService, WebsocketTTSService
+from pipecat.transcriptions.language import Language, resolve_language
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import NOT_GIVEN, NotGiven
+
+
+def language_to_inworld_language(language: Language) -> str:
+    """Convert a Language enum to an Inworld TTS BCP-47 language tag.
+
+    Args:
+        language: The Language enum value to convert.
+
+    Returns:
+        The corresponding Inworld BCP-47 language tag (e.g. ``"en-US"``).
+        Unverified languages fall back to their BCP-47 string value with a warning.
+    """
+    LANGUAGE_MAP = {
+        Language.AR: "ar-SA",
+        Language.DE: "de-DE",
+        Language.EN: "en-US",
+        Language.ES: "es-ES",
+        Language.FR: "fr-FR",
+        Language.HE: "he-IL",
+        Language.HI: "hi-IN",
+        Language.IT: "it-IT",
+        Language.JA: "ja-JP",
+        Language.KO: "ko-KR",
+        Language.NL: "nl-NL",
+        Language.PL: "pl-PL",
+        Language.PT: "pt-BR",
+        Language.RU: "ru-RU",
+        Language.ZH: "zh-CN",
+    }
+    return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
 
 
 @dataclass
@@ -70,10 +92,18 @@ class InworldTTSSettings(TTSSettings):
     Parameters:
         speaking_rate: Speaking rate for speech synthesis.
         temperature: Temperature for speech synthesis.
+        delivery_mode: Controls the stability vs. creativity tradeoff.
+            ``"STABLE"`` produces reliable, predictable speech.
+            ``"BALANCED"`` is the default midpoint.
+            ``"CREATIVE"`` produces more expressive, emotionally varied speech.
+            Only supported by ``inworld-tts-2``.
     """
 
-    speaking_rate: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    temperature: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    speaking_rate: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    temperature: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    delivery_mode: Literal["STABLE", "BALANCED", "CREATIVE"] | None | NotGiven = field(
+        default_factory=lambda: NOT_GIVEN
+    )
 
     _aliases: ClassVar[dict[str, str]] = {
         "voiceId": "voice",
@@ -100,11 +130,16 @@ class InworldHttpTTSService(TTSService):
     Settings = InworldTTSSettings
     _settings: Settings
 
+    @deprecated(
+        "`InworldHttpTTSService.InputParams` is deprecated since 0.0.105 and will be removed in "
+        "2.0.0. Use `InworldHttpTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for Inworld TTS configuration.
 
         .. deprecated:: 0.0.105
             Use ``InworldHttpTTSService.Settings`` directly via the ``settings`` parameter instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             temperature: Temperature for speech synthesis.
@@ -140,11 +175,13 @@ class InworldHttpTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=InworldHttpTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             model: ID of the model to use for synthesis.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=InworldHttpTTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             streaming: Whether to use streaming mode.
             sample_rate: Audio sample rate in Hz.
@@ -154,7 +191,8 @@ class InworldHttpTTSService(TTSService):
             params: Input parameters for Inworld TTS configuration.
 
                 .. deprecated:: 0.0.105
-                    Use ``settings=InworldHttpTTSService.Settings(...)`` instead.
+                    Use ``settings=InworldHttpTTSService.Settings(...)`` instead. Will
+                    be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -167,6 +205,7 @@ class InworldHttpTTSService(TTSService):
             language=None,
             speaking_rate=None,
             temperature=None,
+            delivery_mode=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -227,13 +266,24 @@ class InworldHttpTTSService(TTSService):
         """
         return True
 
-    async def start(self, frame: StartFrame):
-        """Start the Inworld TTS service.
+    def language_to_service_language(self, language: Language) -> str | None:
+        """Convert a Language enum to Inworld language format.
 
         Args:
-            frame: The start frame.
+            language: The language to convert.
+
+        Returns:
+            The Inworld-specific BCP-47 language code, or None if not supported.
         """
-        await super().start(frame)
+        return language_to_inworld_language(language)
+
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service.
+
+        Args:
+            setup: Configuration object containing setup parameters.
+        """
+        await super().setup(setup)
         self._audio_sample_rate = self.sample_rate
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
@@ -293,8 +343,6 @@ class InworldHttpTTSService(TTSService):
         Returns:
             An asynchronous generator of frames.
         """
-        logger.debug(f"{self}: Generating TTS [{text}] (streaming={self._streaming})")
-
         self._current_run_had_timestamps = False
 
         audio_config = {
@@ -313,6 +361,10 @@ class InworldHttpTTSService(TTSService):
 
         if self._settings.temperature is not None:
             payload["temperature"] = self._settings.temperature
+        if self._settings.delivery_mode is not None:
+            payload["deliveryMode"] = self._settings.delivery_mode
+        if self._settings.language is not None:
+            payload["language"] = self._settings.language
 
         # Use WORD timestamps for simplicity and correct spacing/capitalization
         payload["timestampType"] = self._timestamp_type
@@ -411,7 +463,7 @@ class InworldHttpTTSService(TTSService):
                         if word_times:
                             self._current_run_had_timestamps = True
                             await self.add_word_timestamps(
-                                word_times, context_id, includes_inter_frame_spaces=True
+                                word_times, context_id, pre_merge_tokens=True
                             )
                         # Track the maximum end time across all chunks
                         utterance_duration = max(utterance_duration, chunk_end_time)
@@ -449,9 +501,7 @@ class InworldHttpTTSService(TTSService):
             word_times, chunk_end_time = self._calculate_word_times(timestamp_info)
             if word_times:
                 self._current_run_had_timestamps = True
-                await self.add_word_timestamps(
-                    word_times, context_id, includes_inter_frame_spaces=True
-                )
+                await self.add_word_timestamps(word_times, context_id, pre_merge_tokens=True)
             utterance_duration = chunk_end_time
 
         audio_data = base64.b64decode(response_data["audioContent"])
@@ -512,11 +562,16 @@ class InworldTTSService(WebsocketTTSService):
     Settings = InworldTTSSettings
     _settings: Settings
 
+    @deprecated(
+        "`InworldTTSService.InputParams` is deprecated since 0.0.105 and will be removed in "
+        "2.0.0. Use `InworldTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for Inworld WebSocket TTS configuration.
 
         .. deprecated:: 0.0.105
             Use ``InworldTTSService.Settings`` directly via the ``settings`` parameter instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             temperature: Temperature for speech synthesis.
@@ -567,11 +622,13 @@ class InworldTTSService(WebsocketTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=InworldTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             model: ID of the model to use for synthesis.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=InworldTTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             url: URL of the Inworld WebSocket API.
             sample_rate: Audio sample rate in Hz.
@@ -586,6 +643,7 @@ class InworldTTSService(WebsocketTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=InworldTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -593,6 +651,7 @@ class InworldTTSService(WebsocketTTSService):
 
                 .. deprecated:: 0.0.104
                     Use ``text_aggregation_mode`` instead.
+                    Will be removed in 2.0.0.
 
             text_aggregation_mode: How to aggregate text before synthesis.
             append_trailing_space: Whether to append a trailing space to text before sending to TTS.
@@ -609,6 +668,7 @@ class InworldTTSService(WebsocketTTSService):
             language=None,
             speaking_rate=None,
             temperature=None,
+            delivery_mode=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -700,33 +760,26 @@ class InworldTTSService(WebsocketTTSService):
         """
         return True
 
-    async def start(self, frame: StartFrame):
-        """Start the Inworld WebSocket TTS service.
+    def language_to_service_language(self, language: Language) -> str | None:
+        """Convert a Language enum to Inworld language format.
 
         Args:
-            frame: The start frame.
+            language: The language to convert.
+
+        Returns:
+            The Inworld-specific BCP-47 language code, or None if not supported.
         """
-        await super().start(frame)
+        return language_to_inworld_language(language)
+
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service and connect.
+
+        Args:
+            setup: Configuration object containing setup parameters.
+        """
+        await super().setup(setup)
         self._audio_sample_rate = self.sample_rate
         await self._connect()
-
-    async def stop(self, frame: EndFrame):
-        """Stop the Inworld WebSocket TTS service.
-
-        Args:
-            frame: The end frame.
-        """
-        await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        """Cancel the Inworld WebSocket TTS service.
-
-        Args:
-            frame: The cancel frame.
-        """
-        await super().cancel(frame)
-        await self._disconnect()
 
     async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio without closing the context.
@@ -919,7 +972,7 @@ class InworldTTSService(WebsocketTTSService):
                 ("X-User-Agent", USER_AGENT),
                 ("X-Request-Id", request_id),
             ]
-            self._websocket = await websocket_connect(self._url, additional_headers=headers)
+            self._websocket = await self._websocket_connect(self._url, additional_headers=headers)
             await self._call_event_handler("on_connected")
         except Exception as e:
             await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
@@ -980,10 +1033,19 @@ class InworldTTSService(WebsocketTTSService):
                 error_msg = status.get("message", "Unknown error")
                 error_code = status.get("code")
 
-                # Handle "Context not found" error (code 5)
-                # This can happen when a keepalive message is sent but no context is available.
+                # Handle benign context errors:
+                # - "Context not found" (code 5): keepalive sent after context expired
+                # - "context_id is required" / "no open context": keepalive sent
+                #   without an active context
                 if error_code == 5 and "not found" in error_msg.lower():
                     logger.debug(f"{self}: Context {ctx_id} not found.")
+                    continue
+                lower_error_msg = error_msg.lower()
+                if (
+                    "context_id is required" in lower_error_msg
+                    or "no open context" in lower_error_msg
+                ):
+                    logger.debug(f"{self}: Contextless message rejected (benign): {error_msg}")
                     continue
 
                 # For other errors, push error frame
@@ -1019,9 +1081,7 @@ class InworldTTSService(WebsocketTTSService):
                 if word_times:
                     if ctx_id:
                         self._contexts_with_timestamps.add(ctx_id)
-                    await self.add_word_timestamps(
-                        word_times, ctx_id, includes_inter_frame_spaces=True
-                    )
+                    await self.add_word_timestamps(word_times, ctx_id, pre_merge_tokens=True)
 
             # Handle flush completion, which indicates the end of a generation
             if "flushCompleted" in result:
@@ -1089,6 +1149,10 @@ class InworldTTSService(WebsocketTTSService):
 
         if self._settings.temperature is not None:
             create_config["temperature"] = self._settings.temperature
+        if self._settings.delivery_mode is not None:
+            create_config["deliveryMode"] = self._settings.delivery_mode
+        if self._settings.language is not None:
+            create_config["language"] = self._settings.language
         if self._apply_text_normalization is not None:
             create_config["applyTextNormalization"] = self._apply_text_normalization
         if self._auto_mode is not None:
@@ -1151,6 +1215,11 @@ class InworldTTSService(WebsocketTTSService):
         try:
             if not self._websocket or self._websocket.state is State.CLOSED:
                 await self._connect()
+
+            if self._websocket is None:
+                logger.warning(f"{self}: websocket unavailable after connect attempt, skipping TTS")
+                yield ErrorFrame(error="websocket unavailable")
+                return
 
             try:
                 if not self.audio_context_available(context_id):

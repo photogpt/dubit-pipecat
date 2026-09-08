@@ -8,11 +8,21 @@
 
 import json
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from pipecat.adapters.schemas.direct_function import DirectFunction
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.services.openai._constants import OPENAI_REALTIME_WHISPER_MODEL, OPENAI_SAMPLE_RATE
+
+Modality: TypeAlias = Literal["text", "audio"]
+"""A modality the model can respond with."""
+
+ImageDetail: TypeAlias = Literal["auto", "low", "high"]
+"""How much detail the model should read out of an image."""
 
 #
 # session properties
@@ -34,7 +44,7 @@ class PCMAudioFormat(AudioFormat):
     """
 
     type: Literal["audio/pcm"] = "audio/pcm"
-    rate: Literal[24000] = 24000
+    rate: Literal[24000] = OPENAI_SAMPLE_RATE
 
 
 class PCMUAudioFormat(AudioFormat):
@@ -60,20 +70,21 @@ class PCMAAudioFormat(AudioFormat):
 class InputAudioTranscription(BaseModel):
     """Configuration for audio transcription settings."""
 
-    model: str = "gpt-4o-transcribe"
+    model: str = OPENAI_REALTIME_WHISPER_MODEL
     language: str | None
     prompt: str | None
 
     def __init__(
         self,
-        model: str | None = "gpt-4o-transcribe",
+        model: str | None = OPENAI_REALTIME_WHISPER_MODEL,
         language: str | None = None,
         prompt: str | None = None,
     ):
         """Initialize InputAudioTranscription.
 
         Args:
-            model: Transcription model to use (e.g., "gpt-4o-transcribe", "whisper-1").
+            model: Transcription model to use (e.g., "gpt-realtime-whisper",
+                "gpt-4o-transcribe", "whisper-1").
             language: Optional language code for transcription.
             prompt: Optional transcription hint text.
         """
@@ -164,6 +175,19 @@ class AudioConfiguration(BaseModel):
     output: AudioOutput | None = None
 
 
+class Reasoning(BaseModel):
+    """Reasoning configuration for reasoning-capable Realtime models (e.g. ``gpt-realtime-2``).
+
+    Parameters:
+        effort: How much reasoning effort the model should apply. ``None``
+            (the default) leaves the field unset and lets the server pick.
+    """
+
+    # ``| str`` for forward compatibility: if OpenAI adds new effort levels,
+    # users can pass the new string without waiting for a Pipecat release.
+    effort: Literal["minimal", "low", "medium", "high", "xhigh"] | str | None = None
+
+
 class SessionProperties(BaseModel):
     """Configuration properties for an OpenAI Realtime session.
 
@@ -184,6 +208,8 @@ class SessionProperties(BaseModel):
         prompt: Reference to a prompt template and its variables.
         expires_at: Session expiration timestamp.
         include: Additional fields to include in server outputs.
+        reasoning: Reasoning configuration. Only supported by reasoning-capable
+            Realtime models such as ``gpt-realtime-2``.
     """
 
     # Needed to support ToolSchema in tools field.
@@ -193,19 +219,34 @@ class SessionProperties(BaseModel):
     object: Literal["realtime.session"] | None = None
     id: str | None = None
     model: str | None = None
-    output_modalities: list[Literal["text", "audio"]] | None = None
+    output_modalities: list[Modality] | None = None
     instructions: str | None = None
     audio: AudioConfiguration | None = None
-    # Tools can only be ToolsSchema when provided by the user, in either the
-    # OpenAIRealtimeLLMService constructor or through LLMUpdateSettingsFrame.
-    # We'll never serialize/deserialize ToolsSchema when talking to the server.
-    tools: ToolsSchema | list[dict] | None = None
+    # Tools provided by the user (via the service constructor or
+    # LLMUpdateSettingsFrame) may be a ToolsSchema or a plain list of standard
+    # tools (the validator below normalizes that to a ToolsSchema); a list of
+    # provider-native tool dicts passes through. ToolsSchema is never
+    # serialized/deserialized when talking to the server.
+    tools: ToolsSchema | list[FunctionSchema | DirectFunction] | list[dict] | None = None
     tool_choice: Literal["auto", "none", "required"] | None = None
     max_output_tokens: int | Literal["inf"] | None = None
     tracing: Literal["auto"] | dict | None = None
     prompt: dict | None = None
     expires_at: int | None = None
     include: list[str] | None = None
+    reasoning: Reasoning | None = None
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def _normalize_tools(cls, v):
+        """Wrap a plain list of standard tools in a ``ToolsSchema``.
+
+        Provider-native tool lists (dicts) pass through unchanged.
+        """
+        if isinstance(v, list):
+            normalized = LLMContext._normalize_and_validate_tools(v, allow_provider_tools=True)
+            return normalized if isinstance(normalized, (ToolsSchema, list)) else None
+        return v
 
 
 #
@@ -232,7 +273,7 @@ class ItemContent(BaseModel):
     audio: str | None = None  # base64-encoded audio
     transcript: str | None = None
     image_url: str | None = None  # base64-encoded image as data URI
-    detail: Literal["auto", "low", "high"] | None = None
+    detail: ImageDetail | None = None
 
 
 class ConversationItem(BaseModel):
@@ -290,7 +331,7 @@ class ResponseProperties(BaseModel):
         max_output_tokens: Maximum tokens for this response.
     """
 
-    output_modalities: list[Literal["text", "audio"]] | None = ["audio"]
+    output_modalities: list[Modality] | None = ["audio"]
     instructions: str | None = None
     audio: AudioConfiguration | None = None
     tools: list[dict] | None = None
@@ -1053,7 +1094,7 @@ class Response(BaseModel):
     status: Literal["completed", "in_progress", "incomplete", "cancelled", "failed"]
     status_details: Any
     output: list[ConversationItem]
-    output_modalities: list[Literal["text", "audio"]] | None = None
+    output_modalities: list[Modality] | None = None
     max_output_tokens: int | Literal["inf"] | None = None
     audio: AudioConfiguration | None = None
     usage: Usage | None = None

@@ -10,7 +10,13 @@ from pipecat.processors.frameworks.rtvi.frames import (
     RTVIClientMessageFrame,
     RTVIServerMessageFrame,
     RTVIServerResponseFrame,
+    RTVIUICancelJobGroupFrame,
+    RTVIUICommandFrame,
+    RTVIUIEventFrame,
+    RTVIUIJobGroupFrame,
+    RTVIUISnapshotFrame,
 )
+from pipecat.processors.frameworks.rtvi.models import BotOutputTransformResult, SpokenProgressData
 from pipecat.processors.frameworks.rtvi.observer import (
     RTVIFunctionCallReportLevel,
     RTVIObserver,
@@ -19,6 +25,8 @@ from pipecat.processors.frameworks.rtvi.observer import (
 from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
 
 __all__ = [
+    "BotOutputTransformResult",
+    "SpokenProgressData",
     "RTVIClientMessageFrame",
     "RTVIFunctionCallReportLevel",
     "RTVIObserver",
@@ -26,4 +34,9 @@ __all__ = [
     "RTVIProcessor",
     "RTVIServerMessageFrame",
     "RTVIServerResponseFrame",
+    "RTVIUICancelJobGroupFrame",
+    "RTVIUICommandFrame",
+    "RTVIUIEventFrame",
+    "RTVIUISnapshotFrame",
+    "RTVIUIJobGroupFrame",
 ]

@@ -25,16 +25,17 @@ from pipecat.frames.frames import (
     VisionFullResponseStartFrame,
     VisionTextFrame,
 )
-from pipecat.services.settings import VisionSettings, assert_given
+from pipecat.services.settings import VisionSettings
 from pipecat.services.vision_service import VisionService
+from pipecat.utils.types import assert_given
 
 try:
     import torch
     from transformers import AutoModelForCausalLM
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use Moondream, you need to `pip install pipecat-ai[moondream]`.")
-    raise Exception(f"Missing module(s): {e}")
+    logger.error('In order to use Moondream, you need to `uv add "pipecat-ai[moondream]"`.')
+    raise ImportError(f"Missing module(s): {e}") from e
 
 
 def detect_device():
@@ -86,7 +87,7 @@ class MoondreamService(VisionService):
         self,
         *,
         model: str | None = None,
-        revision="2025-01-09",
+        revision="2025-06-21",
         use_cpu=False,
         settings: Settings | None = None,
         **kwargs,
@@ -98,6 +99,7 @@ class MoondreamService(VisionService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=MoondreamService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             revision: Specific model revision to use.
             use_cpu: Whether to force CPU usage instead of hardware acceleration.

@@ -24,7 +24,9 @@ from pydantic import BaseModel
 
 from pipecat.frames.frames import ErrorFrame, Frame, URLImageRawFrame
 from pipecat.services.image_service import ImageGenService
-from pipecat.services.settings import NOT_GIVEN, ImageGenSettings, _NotGiven
+from pipecat.services.settings import ImageGenSettings
+from pipecat.utils.deprecation import deprecated
+from pipecat.utils.types import NOT_GIVEN, NotGiven
 
 
 @dataclass
@@ -40,15 +42,21 @@ class FalImageGenSettings(ImageGenSettings):
         expand_prompt: Whether to automatically expand/enhance the prompt.
         enable_safety_checker: Whether to enable content safety filtering.
         format: Output image format.
+        negative_prompt: Details to keep out of the generated image. ``None`` omits it
+            from the request.
+        guidance_scale: CFG scale, how closely generation follows the prompt. ``None``
+            leaves the model's own default in place.
     """
 
-    seed: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    num_inference_steps: int | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    num_images: int | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    image_size: str | dict[str, int] | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    expand_prompt: bool | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    enable_safety_checker: bool | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    format: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    seed: int | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    num_inference_steps: int | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    num_images: int | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    image_size: str | dict[str, int] | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    expand_prompt: bool | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    enable_safety_checker: bool | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    format: str | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    negative_prompt: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    guidance_scale: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
     def to_api_arguments(self) -> dict[str, Any]:
         """Build the Fal API arguments dict from settings, excluding None values."""
@@ -61,6 +69,10 @@ class FalImageGenSettings(ImageGenSettings):
         args["expand_prompt"] = self.expand_prompt
         args["enable_safety_checker"] = self.enable_safety_checker
         args["format"] = self.format
+        if self.negative_prompt is not None:
+            args["negative_prompt"] = self.negative_prompt
+        if self.guidance_scale is not None:
+            args["guidance_scale"] = self.guidance_scale
         return args
 
 
@@ -74,11 +86,16 @@ class FalImageGenService(ImageGenService):
     Settings = FalImageGenSettings
     _settings: Settings
 
+    @deprecated(
+        "`FalImageGenService.InputParams` is deprecated since 0.0.105 and will be removed in "
+        "2.0.0. Use `FalImageGenService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for Fal.ai image generation.
 
         .. deprecated:: 0.0.105
             Use ``settings=FalImageGenService.Settings(...)`` instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             seed: Random seed for reproducible generation. If None, uses random seed.
@@ -98,8 +115,6 @@ class FalImageGenService(ImageGenService):
         enable_safety_checker: bool = True
         format: str = "png"
 
-    _settings: Settings
-
     def __init__(
         self,
         *,
@@ -117,12 +132,14 @@ class FalImageGenService(ImageGenService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=FalImageGenService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             aiohttp_session: HTTP client session for downloading generated images.
             model: The Fal.ai model to use for generation. Defaults to "fal-ai/fast-sdxl".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=FalImageGenService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             key: Optional API key for Fal.ai. If provided, sets FAL_KEY environment variable.
             settings: Runtime-updatable settings. When provided alongside deprecated
@@ -139,6 +156,8 @@ class FalImageGenService(ImageGenService):
             expand_prompt=False,
             enable_safety_checker=True,
             format="png",
+            negative_prompt=None,
+            guidance_scale=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -181,7 +200,7 @@ class FalImageGenService(ImageGenService):
         def load_image_bytes(encoded_image: bytes):
             buffer = io.BytesIO(encoded_image)
             image = Image.open(buffer)
-            return (image.tobytes(), image.size, image.format)
+            return (image.tobytes(), image.size, image.mode)
 
         logger.debug(f"Generating image from prompt: {prompt}")
 

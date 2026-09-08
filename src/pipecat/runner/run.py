@@ -13,11 +13,15 @@ supports multiple transport types with a unified interface.
 
 Install with::
 
-    pip install pipecat-ai[runner]
+    uv add "pipecat-ai[runner]"
 
 All bots must implement a `bot(runner_args)` async function as the entry point.
 The server automatically discovers and executes this function when connections
 are established.
+
+By default the runner starts a single FastAPI server that supports WebRTC, Daily,
+and telephony transports simultaneously. Clients declare which transport they want
+via the ``transport`` field in the ``/start`` request body (default: ``"webrtc"``).
 
 Single transport example::
 
@@ -52,25 +56,61 @@ Multiple transport example::
 Supported transports:
 
 - Daily - Creates rooms and tokens, runs bot as participant
-- WebRTC - Provides local WebRTC interface with prebuilt UI
+- LiveKit - Mints room tokens, runs bot as participant
+- MOQ - Media over QUIC, connects to a MOQ relay for pub/sub streaming
 - Telephony - Handles webhook and WebSocket connections for Twilio, Telnyx, Plivo, Exotel
+- WebRTC - Provides local WebRTC interface with prebuilt UI
+
+The ``/start`` endpoint accepts::
+
+    {
+        "transport": "webrtc",        // "webrtc" | "daily" | "livekit" | "twilio" |
+                                      // "telnyx" | "plivo" | "exotel" — default: "webrtc"
+
+        // WebRTC-specific
+        "enableDefaultIceServers": false,
+        "body": {...},
+
+        // Daily-specific
+        "createDailyRoom": true,
+        "dailyRoomProperties": {...},
+        "dailyMeetingTokenProperties": {...},
+        "body": {...}
+    }
 
 To run locally:
 
-- WebRTC: `python bot.py -t webrtc`
-- ESP32: `python bot.py -t webrtc --esp32 --host 192.168.1.100`
-- Daily (server): `python bot.py -t daily`
-- Daily (direct, testing only): `python bot.py -d`
-- Telephony: `python bot.py -t twilio -x your_username.ngrok.io`
-- Exotel: `python bot.py -t exotel` (no proxy needed, but ngrok connection to HTTP 7860 is required)
+- All transports (default): ``python bot.py``
+- Daily only: ``python bot.py -t daily``
+- Daily (direct, testing only): ``python bot.py -d``
+- ESP32: ``python bot.py -t webrtc --esp32 --host 192.168.1.100``
+- WebRTC with custom STUN/TURN: ``python bot.py -t webrtc --ice-servers
+  stun:stun.l.google.com:19302 '{"urls": "turn:turn.example.com:3478", "username":
+  "user", "credential": "pass"}'`` (or set ``PIPECAT_ICE_SERVERS``)
+- Exotel: ``python bot.py -t exotel`` (no proxy needed, but ngrok connection to HTTP 7860 is required)
+- LiveKit only: ``python bot.py -t livekit``
+- MOQ (bot is the server, local dev): ``python bot.py -t moq`` (serve mode and
+  ``--moq-tls-generate localhost`` are the defaults)
+- MOQ (bot and browser both dial a relay): ``python bot.py -t moq --moq-connect
+  https://cdn.moq.dev/anon``
+- Telephony: ``python bot.py -t twilio -x your_username.ngrok.io``
+- WebRTC only: ``python bot.py -t webrtc``
+- WhatsApp: ``python bot.py --whatsapp``
 """
 
 import argparse
 import asyncio
+import base64
+import hashlib
+import hmac
+import importlib.util
+import json
 import mimetypes
 import os
+import secrets
 import sys
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from http import HTTPMethod
@@ -81,24 +121,40 @@ import aiohttp
 from fastapi.responses import FileResponse, Response
 from loguru import logger
 
+from pipecat.runner.moq import (
+    DEFAULT_MOQ_BOT_ID,
+    DEFAULT_MOQ_CLIENT_ID,
+    DEFAULT_MOQ_SERVE_BIND,
+    _build_moq_client_config,
+    _new_session_namespace,
+    _validate_moq_args,
+)
 from pipecat.runner.types import (
     DailyRunnerArguments,
+    EvalRunnerArguments,
+    LiveKitRunnerArguments,
+    MOQRunnerArguments,
     RunnerArguments,
     SmallWebRTCRunnerArguments,
+    VonageRunnerArguments,
     WebSocketRunnerArguments,
 )
+from pipecat.runner.vonage import configure as configure_vonage
+from pipecat.utils.security.allowed_origins import is_origin_allowed
 
 try:
     import uvicorn
     from dotenv import load_dotenv
     from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, WebSocket
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import HTMLResponse, RedirectResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 except ImportError as e:
     logger.error(f"Runner dependencies not available: {e}")
-    logger.error("To use Pipecat runners, install with: pip install pipecat-ai[runner]")
+    logger.error('To use Pipecat runners, install with: uv add "pipecat-ai[runner]"')
     raise ImportError(
-        "Runner dependencies required. Install with: pip install pipecat-ai[runner]"
+        'Runner dependencies required. Install with: uv add "pipecat-ai[runner]"'
     ) from e
 
 
@@ -106,6 +162,22 @@ load_dotenv(override=True)
 os.environ["ENV"] = "local"
 
 TELEPHONY_TRANSPORTS = ["twilio", "telnyx", "plivo", "exotel"]
+TRANSPORT_ROUTE_DEPENDENCIES = {
+    "daily": ("daily",),
+    "livekit": ("livekit.api",),
+    "webrtc": ("aiortc",),
+    "telephony": ("fastapi", "websockets"),
+    "websocket": ("fastapi", "websockets"),
+    "moq": ("moq", "cryptography"),
+}
+TRANSPORT_INSTALL_HINTS = {
+    "daily": "install pipecat-ai[daily]",
+    "livekit": "install pipecat-ai[livekit]",
+    "webrtc": "install pipecat-ai[webrtc]",
+    "telephony": "install pipecat-ai[websocket]",
+    "websocket": "install pipecat-ai[websocket]",
+    "moq": "install pipecat-ai[moq]",
+}
 
 # Mirror Pipecat Cloud's 4-hour max session limit so dev rooms get cleaned up.
 PIPECAT_ROOM_EXP_HOURS = 4.0
@@ -113,6 +185,10 @@ PIPECAT_ROOM_EXP_HOURS = 4.0
 RUNNER_DOWNLOADS_FOLDER: str | None = None
 RUNNER_HOST: str = "localhost"
 RUNNER_PORT: int = 7860
+
+# Per-process HMAC secret for WebSocket token authentication. Auto-generated so
+# tokens from one runner instance cannot be replayed against another.
+_WS_AUTH_SECRET: bytes = secrets.token_bytes(32)
 
 app: FastAPI = FastAPI()
 """The FastAPI application instance.
@@ -129,6 +205,285 @@ Import this to add custom routes from other packages before calling
     if __name__ == "__main__":
         main()
 """
+
+# Bot sessions started from a request handler outlive the response, and the event
+# loop only holds a weak reference to a task, so one that nothing else references
+# can be collected while it is still running.
+_bot_sessions: set[asyncio.Task] = set()
+
+
+def _start_bot_session(coro) -> asyncio.Task:
+    """Run a bot in the background, holding a reference until it finishes."""
+    task = asyncio.create_task(coro)
+    _bot_sessions.add(task)
+    task.add_done_callback(_bot_sessions.discard)
+    return task
+
+
+def _is_module_available(module: str) -> bool:
+    """Check whether a module can be imported without importing it.
+
+    Args:
+        module: Fully-qualified module name to check.
+
+    Returns:
+        ``True`` if Python can resolve the module, ``False`` otherwise.
+    """
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+def _transport_route_dependencies(transport: str) -> tuple[str, ...]:
+    """Return module dependencies required for a transport route.
+
+    Args:
+        transport: Transport name from the runner request or CLI.
+
+    Returns:
+        Module names required to enable the transport route.
+    """
+    if transport in TELEPHONY_TRANSPORTS:
+        return TRANSPORT_ROUTE_DEPENDENCIES["telephony"]
+    return TRANSPORT_ROUTE_DEPENDENCIES.get(transport, ())
+
+
+def _transport_routes_enabled(transport: str) -> bool:
+    """Return whether a transport route can run in this environment.
+
+    Args:
+        transport: Transport name from the runner request or CLI.
+
+    Returns:
+        ``True`` if the requested transport is enabled.
+    """
+    return all(_is_module_available(module) for module in _transport_route_dependencies(transport))
+
+
+def _runner_url(args: argparse.Namespace) -> str:
+    """Return the browser URL for the runner prebuilt client."""
+    return f"http://{args.host}:{args.port}"
+
+
+def _transport_status_lists() -> tuple[list[str], list[str]]:
+    """Return enabled and disabled transport labels for the startup banner."""
+    transports = ["daily", "livekit", "webrtc", "telephony", "websocket", "moq"]
+    enabled = []
+    disabled = []
+
+    for label in transports:
+        if _transport_routes_enabled(label):
+            enabled.append(label)
+        else:
+            disabled.append(f"{label} ({TRANSPORT_INSTALL_HINTS[label]})")
+
+    return enabled, disabled
+
+
+def _format_transport_status(labels: list[str]) -> str:
+    """Format a startup banner transport status list."""
+    return ", ".join(labels) if labels else "none"
+
+
+def _generate_ws_token(ttl: int = 300) -> str:
+    """Return a signed, self-expiring WebSocket session token.
+
+    The token is ``<base64url-payload>.<hmac-sha256-hex>`` where the payload
+    encodes ``{"exp": unix_timestamp, "jti": random_nonce}``. Valid for ``ttl``
+    seconds (default 5 min). The nonce ensures uniqueness within the same second.
+    """
+    payload = (
+        base64.urlsafe_b64encode(
+            json.dumps({"exp": int(time.time()) + ttl, "jti": secrets.token_hex(8)}).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
+    sig = hmac.new(_WS_AUTH_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_and_consume_ws_token(used: set[str], token: str) -> bool:
+    """Validate a WebSocket session token and mark it as used (one-time use).
+
+    Args:
+        used: Set of already-consumed tokens (mutated on success).
+        token: Token string obtained from :func:`_generate_ws_token`.
+
+    Returns:
+        ``True`` if the token has a valid signature, has not expired, and has
+        not been used before. Adds the token to ``used`` on success so replay
+        attempts are rejected.
+    """
+    try:
+        payload, sig = token.rsplit(".", 1)
+    except ValueError:
+        return False
+    expected = hmac.new(_WS_AUTH_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return False
+    padded = payload + "=" * (-len(payload) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return False
+    if time.time() > data.get("exp", 0):
+        return False
+    if token in used:
+        return False
+    used.add(token)
+    return True
+
+
+def _extract_ws_token(websocket) -> str | None:
+    """Extract a WebSocket session token from the connection handshake.
+
+    Checks, in order:
+
+    1. ``Authorization: Bearer <token>`` request header.
+    2. ``?token=<token>`` query parameter.
+
+    Returns the token string, or ``None`` if not present.
+    """
+    auth = websocket.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return websocket.query_params.get("token")
+
+
+def _print_security_status(args: argparse.Namespace):
+    """Print security status lines (auth + origin restriction)."""
+    if args.ws_auth == "token":
+        print("   → WebSocket auth:  token (HMAC, call /start to obtain a token)")
+    if args.allowed_origins:
+        print(f"   → Allowed origins: {', '.join(args.allowed_origins)}")
+    else:
+        print("   → Allowed origins: all (no restriction)")
+
+
+def _style_banner_line(text: str) -> str:
+    """Apply the development-runner banner's style (dim cyan) to one line.
+
+    Returns the text unchanged when stdout is not a TTY (e.g. redirected or
+    captured) or ``NO_COLOR`` is set, so escape codes never leak into logs.
+    """
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        return f"\033[2;36m{text}\033[0m"  # dim + cyan
+    return text
+
+
+def _display_width(text: str) -> int:
+    """Return the number of terminal columns ``text`` occupies.
+
+    Counts East-Asian wide/fullwidth characters (including emoji) as two
+    columns, and combining marks and variation selectors as zero, so bordered
+    lines align regardless of how a terminal sizes wide glyphs.
+    """
+    width = 0
+    for ch in text:
+        # Combining marks and variation selectors (VS1-VS16) add no width.
+        if unicodedata.combining(ch) or 0xFE00 <= ord(ch) <= 0xFE0F:
+            continue
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def _print_dev_runner_banner():
+    """Print a bordered banner identifying this as the development runner.
+
+    Names the runner and links to the deployment docs. Rendered dim so it
+    doesn't compete with the connection details that follow.
+    """
+    lines = [
+        "ᓚᘏᗢ PIPECAT DEVELOPMENT RUNNER",
+        "",
+        "Learn about running bots locally and in production:",
+        "https://docs.pipecat.ai/pipecat/deployment/overview",
+    ]
+    width = max(_display_width(line) for line in lines)
+    print()
+    print(_style_banner_line("╭" + "─" * (width + 2) + "╮"))
+    for line in lines:
+        padding = " " * (width - _display_width(line))
+        print(_style_banner_line(f"│ {line}{padding} │"))
+    print(_style_banner_line("╰" + "─" * (width + 2) + "╯"))
+
+
+def _print_startup_message(args: argparse.Namespace):
+    """Print connection information for the development runner."""
+    print()
+    if args.transport is None:
+        enabled, disabled = _transport_status_lists()
+        print("🚀 Bot ready!")
+        print(f"   → Open: {_runner_url(args)}")
+        print(f"   → Enabled transports: {_format_transport_status(enabled)}")
+        if disabled:
+            print(f"   → Disabled transports: {_format_transport_status(disabled)}")
+        _print_security_status(args)
+    elif args.transport == "webrtc":
+        if args.esp32:
+            print("🚀 Bot ready! (ESP32 mode)")
+        elif args.whatsapp:
+            print("🚀 Bot ready! (WhatsApp)")
+        else:
+            print("🚀 Bot ready! (WebRTC)")
+        if _transport_routes_enabled("webrtc"):
+            print(f"   → Open: {_runner_url(args)}")
+        else:
+            print(f"   → WebRTC disabled ({TRANSPORT_INSTALL_HINTS['webrtc']})")
+    elif args.transport == "daily":
+        print("🚀 Bot ready! (Daily)")
+        if not _transport_routes_enabled("daily"):
+            print(f"   → Daily disabled ({TRANSPORT_INSTALL_HINTS['daily']})")
+        else:
+            print(f"   → Open: {_runner_url(args)}")
+            if args.dialin:
+                print(
+                    f"   → Daily dial-in webhook: "
+                    f"http://{args.host}:{args.port}/daily-dialin-webhook"
+                )
+                print("   → Configure this URL in your Daily phone number settings")
+    elif args.transport == "livekit":
+        print("🚀 Bot ready! (LiveKit)")
+        if not _transport_routes_enabled("livekit"):
+            print(f"   → LiveKit disabled ({TRANSPORT_INSTALL_HINTS['livekit']})")
+        else:
+            print(f"   → Open: {_runner_url(args)}")
+    elif args.transport in TELEPHONY_TRANSPORTS:
+        print(f"🚀 Bot ready! ({args.transport.capitalize()})")
+        if not _transport_routes_enabled(args.transport):
+            print(f"   → Telephony disabled ({TRANSPORT_INSTALL_HINTS['telephony']})")
+        else:
+            print(f"   → Open: {_runner_url(args)}")
+            if args.proxy:
+                print(f"   → XML webhook: http://{args.host}:{args.port}/")
+            print(f"   → WebSocket:   ws://{args.host}:{args.port}/ws")
+            _print_security_status(args)
+    elif args.transport == "websocket":
+        print("🚀 Bot ready! (WebSocket)")
+        if not _transport_routes_enabled("websocket"):
+            print(f"   → WebSocket disabled ({TRANSPORT_INSTALL_HINTS['websocket']})")
+        else:
+            print(f"   → Open: {_runner_url(args)}")
+            scheme = "wss" if args.host != "localhost" else "ws"
+            print(f"   → WebSocket:   {scheme}://{args.host}:{args.port}/ws-client")
+            _print_security_status(args)
+    elif args.transport == "vonage":
+        print()
+        print("🚀 Bot ready!")
+    elif args.transport == "moq":
+        print("🚀 Bot ready! (MoQ)")
+        if not _transport_routes_enabled("moq"):
+            print(f"   → MoQ disabled ({TRANSPORT_INSTALL_HINTS['moq']})")
+        else:
+            print(f"   → Open: {_runner_url(args)}")
+            if args.moq_serve:
+                print(f"   → MoQ server: bot serving on {args.moq_bind} (no separate relay needed)")
+            else:
+                print(f"   → Relay: {args.moq_host}:{args.moq_port}{args.moq_path}")
+            print(f"   → Namespace: {args.moq_namespace or 'random per session'}")
+    print()
 
 
 def _get_bot_module():
@@ -186,27 +541,390 @@ async def _run_telephony_bot(websocket: WebSocket, args: argparse.Namespace):
     await bot_module.bot(runner_args)
 
 
+async def _run_websocket_bot(websocket: WebSocket, args: argparse.Namespace):
+    """Run a bot for plain WebSocket transport."""
+    bot_module = _get_bot_module()
+
+    runner_args = WebSocketRunnerArguments(
+        websocket=websocket,
+        transport_type="websocket",
+        session_id=str(uuid.uuid4()),
+    )
+    runner_args.cli_args = args
+
+    await bot_module.bot(runner_args)
+
+
+def _setup_websocket_routes(app: FastAPI, args: argparse.Namespace, ws_used_tokens: set[str]):
+    """Set up the plain WebSocket route at ``/ws-client``.
+
+    When ``args.ws_auth == "token"``, connections must present a valid HMAC
+    session token obtained via ``POST /start``. The token may be supplied as:
+
+    - ``Authorization: Bearer <token>`` header
+    - ``?token=<token>`` query parameter
+    - URL path segment: ``/ws-client/<token>``
+
+    Invalid or missing tokens are rejected with WebSocket close code 4003.
+    """
+    if not _transport_routes_enabled("websocket"):
+        return
+
+    async def _handle_plain_ws(websocket: WebSocket, path_token: str | None = None):
+        if args.ws_auth == "token":
+            token = path_token or _extract_ws_token(websocket)
+            if not token or not _verify_and_consume_ws_token(ws_used_tokens, token):
+                logger.warning("WebSocket connection rejected: invalid or missing token")
+                await websocket.close(code=4003)
+                return
+        origin = websocket.headers.get("origin", "")
+        if not is_origin_allowed(origin, args.allowed_origins):
+            logger.warning(f"WebSocket connection rejected: origin '{origin}' not allowed")
+            await websocket.close(code=4003)
+            return
+        await websocket.accept()
+        logger.debug("Plain WebSocket connection accepted")
+        await _run_websocket_bot(websocket, args)
+
+    @app.websocket("/ws-client")
+    async def websocket_client_endpoint(websocket: WebSocket):
+        """Handle plain WebSocket connections (non-telephony)."""
+        await _handle_plain_ws(websocket)
+
+    @app.websocket("/ws-client/{token}")
+    async def websocket_client_endpoint_with_token(websocket: WebSocket, token: str):
+        """Handle plain WebSocket connections with token in the URL path."""
+        await _handle_plain_ws(websocket, path_token=token)
+
+
 def _configure_server_app(args: argparse.Namespace):
-    """Configure the module-level FastAPI app with transport-specific routes."""
+    """Configure the module-level FastAPI app with routes for all transports."""
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=args.allowed_origins or ["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Set up transport-specific routes
-    if args.transport == "webrtc":
-        _setup_webrtc_routes(app, args)
-        if args.whatsapp:
-            _setup_whatsapp_routes(app, args)
-    elif args.transport == "daily":
-        _setup_daily_routes(app, args)
-    elif args.transport in TELEPHONY_TRANSPORTS:
-        _setup_telephony_routes(app, args)
-    else:
-        logger.warning(f"Unknown transport type: {args.transport}")
+    # FastAPI returns 422 Unprocessable Entity for Pydantic validation failures by default, but
+    # swallows the raw request body in the error response. This handler overrides that behavior to
+    # log both the validation errors and the raw body, making it much easier to debug malformed
+    # payloads from any transport (WhatsApp, WebRTC, telephony, etc.).
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        body = await request.body()
+        logger.error(f"422 Validation error on {request.url.path}: {exc.errors()}")
+        logger.error(
+            "Raw body: %s",
+            body.decode(errors="replace")[:5000],
+        )
+        return JSONResponse(status_code=422, content=jsonable_encoder({"detail": exc.errors()}))
+
+    # Shared session store: session_id -> body data. Used by the WebRTC /start
+    # flow and the /sessions/{session_id}/... proxy routes.
+    active_sessions: dict[str, dict[str, Any]] = {}
+
+    # Consumed WebSocket tokens (one-time use). Shared across both WebSocket
+    # endpoint families (/ws and /ws-client).
+    ws_used_tokens: set[str] = set()
+
+    _setup_frontend_routes(app)
+    _setup_webrtc_routes(app, args, active_sessions)
+    _setup_daily_routes(app, args)
+    _setup_telephony_routes(app, args, ws_used_tokens)
+    _setup_websocket_routes(app, args, ws_used_tokens)
+    _setup_unified_start_route(app, args, active_sessions)
+
+    if args.whatsapp:
+        _setup_whatsapp_routes(app, args)
+
+
+def _setup_unified_start_route(
+    app: FastAPI, args: argparse.Namespace, active_sessions: dict[str, dict[str, Any]]
+):
+    """Register the unified POST /start and GET /status endpoints.
+
+    Handles WebRTC, Daily, and telephony transport start flows. Clients specify
+    which transport they want via the ``transport`` field in the request body.
+    When ``-t`` was passed on the command line, requests for any other transport
+    are rejected with HTTP 400.
+    """
+    ALL_TRANSPORTS = ["webrtc", "daily", "livekit", *TELEPHONY_TRANSPORTS, "websocket", "moq"]
+
+    @app.get("/status")
+    async def status():
+        """Return the transports supported by this runner instance."""
+        transports = [args.transport] if args.transport is not None else ALL_TRANSPORTS
+        return {"status": "ready", "transports": transports}
+
+    class IceServer(TypedDict, total=False):
+        urls: str | list[str]
+        username: str
+        credential: str
+
+    class IceConfig(TypedDict):
+        iceServers: list[IceServer]
+
+    class StartBotResult(TypedDict, total=False):
+        sessionId: str
+        iceConfig: IceConfig | None
+        dailyRoom: str | None
+        dailyToken: str | None
+        url: str | None
+        wsUrl: str | None
+        token: str | None
+        # MoQ-specific. Carries everything the browser needs to construct
+        # an `@pipecat-ai/moq-transport` instance.
+        moq: dict[str, Any] | None
+
+    @app.post("/start")
+    async def start_agent(request: Request):
+        """Start a bot session.
+
+        Accepts::
+
+            {
+                "transport": "webrtc",        // "webrtc" | "daily" | "livekit" | "twilio" |
+                                              // "telnyx" | "plivo" | "exotel" — default: "webrtc"
+
+                // WebRTC-specific
+                "enableDefaultIceServers": false,
+                "body": {...},
+
+                // Daily-specific
+                "createDailyRoom": true,
+                "dailyRoomProperties": {...},
+                "dailyMeetingTokenProperties": {...},
+                "body": {...}
+            }
+
+        For WebRTC, ``iceConfig`` in the response carries the servers the runner
+        was started with (``--ice-servers`` or ``PIPECAT_ICE_SERVERS``). When the
+        runner has none, ``enableDefaultIceServers`` returns a public STUN server
+        instead.
+        """
+        try:
+            request_data = await request.json()
+            logger.debug(f"Received request: {request_data}")
+        except Exception as e:
+            logger.error(f"Failed to parse request body: {e}")
+            request_data = {}
+
+        # Determine transport: explicit field → legacy Daily hint → CLI default → webrtc
+        transport = request_data.get("transport")
+        if transport is None and request_data.get("createDailyRoom", False):
+            transport = "daily"
+        if transport is None:
+            transport = args.transport or "webrtc"
+
+        # Enforce restriction when -t was explicitly set on the command line
+        if args.transport is not None and transport != args.transport:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Transport '{transport}' is not allowed. "
+                    f"Server is configured for '{args.transport}' only (-t {args.transport})."
+                ),
+            )
+
+        if not _transport_routes_enabled(transport):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Transport '{transport}' is disabled in this runner environment. "
+                    "Check the startup banner for enabled transports."
+                ),
+            )
+
+        if transport == "webrtc":
+            # WebRTC: register the session; the bot starts when the WebRTC offer arrives.
+            session_id = str(uuid.uuid4())
+            active_sessions[session_id] = request_data.get("body", {})
+
+            result = StartBotResult(
+                sessionId=session_id,
+            )
+            # Servers configured on the runner are handed to the client too, so
+            # both peers negotiate against the same STUN and TURN servers. They
+            # take precedence over the Google STUN fallback.
+            if args.ice_servers:
+                result["iceConfig"] = IceConfig(
+                    iceServers=[IceServer(**server) for server in args.ice_servers]
+                )
+            elif request_data.get("enableDefaultIceServers"):
+                result["iceConfig"] = IceConfig(
+                    iceServers=[IceServer(urls=["stun:stun.l.google.com:19302"])]
+                )
+            return result
+
+        elif transport == "daily":
+            create_daily_room = request_data.get("createDailyRoom", False)
+            body = request_data.get("body", {})
+            daily_room_properties_dict = request_data.get("dailyRoomProperties", None)
+            daily_token_properties_dict = request_data.get("dailyMeetingTokenProperties", None)
+
+            bot_module = _get_bot_module()
+
+            existing_room_url = os.getenv("DAILY_ROOM_URL")
+            session_id = str(uuid.uuid4())
+            result: StartBotResult | None = None
+
+            if create_daily_room or existing_room_url:
+                from pipecat.runner.daily import configure
+                from pipecat.transports.daily.utils import (
+                    DailyMeetingTokenProperties,
+                    DailyRoomProperties,
+                )
+
+                async with aiohttp.ClientSession() as session:
+                    room_properties = None
+                    if daily_room_properties_dict:
+                        daily_room_properties_dict.setdefault(
+                            "exp", time.time() + PIPECAT_ROOM_EXP_HOURS * 3600
+                        )
+                        daily_room_properties_dict.setdefault("eject_at_room_exp", True)
+                        try:
+                            room_properties = DailyRoomProperties(**daily_room_properties_dict)
+                            logger.debug(f"Using custom room properties: {room_properties}")
+                        except Exception as e:
+                            logger.error(f"Failed to parse dailyRoomProperties: {e}")
+
+                    token_properties = None
+                    if daily_token_properties_dict:
+                        try:
+                            token_properties = DailyMeetingTokenProperties(
+                                **daily_token_properties_dict
+                            )
+                            logger.debug(f"Using custom token properties: {token_properties}")
+                        except Exception as e:
+                            logger.error(f"Failed to parse dailyMeetingTokenProperties: {e}")
+
+                    room_url, token = await configure(
+                        session,
+                        room_exp_duration=PIPECAT_ROOM_EXP_HOURS,
+                        room_properties=room_properties,
+                        token_properties=token_properties,
+                    )
+                    runner_args = DailyRunnerArguments(
+                        room_url=room_url, token=token, body=body, session_id=session_id
+                    )
+                    result = StartBotResult(
+                        dailyRoom=room_url,
+                        dailyToken=token,
+                        sessionId=session_id,
+                    )
+            else:
+                runner_args = RunnerArguments(body=body, session_id=session_id)
+
+            runner_args.cli_args = args
+            _start_bot_session(bot_module.bot(runner_args))
+            return result
+
+        elif transport == "livekit":
+            from pipecat.runner.livekit import generate_session_tokens, livekit_credentials
+
+            livekit_url, api_key, api_secret = livekit_credentials()
+
+            body = request_data.get("body", {})
+            room_name = os.getenv("LIVEKIT_ROOM_NAME") or f"pipecat-{uuid.uuid4().hex[:8]}"
+            session_id = str(uuid.uuid4())
+            agent_token, user_token = generate_session_tokens(
+                room_name, session_id, api_key, api_secret
+            )
+
+            bot_module = _get_bot_module()
+            runner_args = LiveKitRunnerArguments(
+                room_name=room_name,
+                url=livekit_url,
+                token=agent_token,
+                body=body,
+                session_id=session_id,
+            )
+            runner_args.cli_args = args
+            _start_bot_session(bot_module.bot(runner_args))
+
+            return StartBotResult(
+                url=livekit_url,
+                token=user_token,
+                sessionId=session_id,
+            )
+
+        elif transport in TELEPHONY_TRANSPORTS:
+            # Telephony: the bot starts when the provider connects to /ws.
+            # Return the WebSocket URL so the caller knows where to point their provider.
+            scheme = "wss" if args.host != "localhost" else "ws"
+            result = StartBotResult(wsUrl=f"{scheme}://{args.host}:{args.port}/ws")
+            if args.ws_auth == "token":
+                result["token"] = _generate_ws_token()
+            return result
+
+        elif transport == "websocket":
+            # Plain WebSocket: the bot starts when the client connects to /ws-client.
+            scheme = "wss" if args.host != "localhost" else "ws"
+            session_id = str(uuid.uuid4())
+            token = _generate_ws_token() if args.ws_auth == "token" else None
+            return StartBotResult(
+                wsUrl=f"{scheme}://{args.host}:{args.port}/ws-client",
+                sessionId=session_id,
+                token=token,
+            )
+
+        elif transport == "moq":
+            # MoQ: spawn the bot and wait for it to finish MoQ bring-up
+            # before returning, so the browser's connection arrives at a
+            # server that is ready to accept it.
+            # Namespace precedence: the client's explicit request, then
+            # --moq-namespace, then a fresh random one. Only client mode
+            # reaches the last case (_validate_moq_args pins serve mode
+            # to a fixed default), and there it's what isolates this
+            # session on the shared relay.
+            namespace = (
+                request_data.get("namespace") or args.moq_namespace or _new_session_namespace()
+            )
+            body = request_data.get("body", {})
+            session_id = str(uuid.uuid4())
+            bot_module = _get_bot_module()
+
+            ready_event = asyncio.Event()
+            runner_args = MOQRunnerArguments(
+                host=args.moq_host,
+                port=args.moq_port,
+                path=args.moq_path,
+                namespace=namespace,
+                participant_id=args.moq_bot_id,
+                peer_id=args.moq_client_id,
+                verify_ssl=not args.moq_tls_insecure,
+                serve=args.moq_serve,
+                bind=args.moq_bind,
+                serve_tls_host=args.moq_tls_host,
+                serve_tls_cert=args.moq_tls_cert,
+                serve_tls_key=args.moq_tls_key,
+                body=body,
+                session_id=session_id,
+                ready_event=ready_event,
+            )
+            runner_args.cli_args = args
+
+            _start_bot_session(bot_module.bot(runner_args))
+            try:
+                await asyncio.wait_for(ready_event.wait(), timeout=15.0)
+            except TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail="Bot did not become ready within 15s",
+                )
+
+            return StartBotResult(
+                sessionId=session_id,
+                moq=_build_moq_client_config(args, namespace, runner_args.cert_fingerprints),
+            )
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown transport '{transport}'.",
+            )
 
 
 def _resolve_download_path(folder: str, filename: str) -> Path:
@@ -220,12 +938,31 @@ def _resolve_download_path(folder: str, filename: str) -> Path:
     return file_path
 
 
-def _setup_webrtc_routes(app: FastAPI, args: argparse.Namespace):
-    """Set up WebRTC-specific routes."""
+def _setup_frontend_routes(app: FastAPI):
+    """Mount the prebuilt frontend UI and root redirect for all transports."""
     try:
-        from pipecat_ai_small_webrtc_prebuilt.frontend import SmallWebRTCPrebuiltUI
+        from pipecat_ai_prebuilt.frontend import PipecatPrebuiltUI
+    except ImportError as e:
+        logger.error(f"Prebuilt frontend not available: {e}")
+        return
 
-        from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+    app.mount("/client", PipecatPrebuiltUI)
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        """Redirect root requests to client interface."""
+        return RedirectResponse(url="/client/")
+
+
+def _setup_webrtc_routes(
+    app: FastAPI, args: argparse.Namespace, active_sessions: dict[str, dict[str, Any]]
+):
+    """Set up WebRTC-specific routes."""
+    if not _transport_routes_enabled("webrtc"):
+        return
+
+    try:
+        from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
         from pipecat.transports.smallwebrtc.request_handler import (
             IceCandidate,
             SmallWebRTCPatchRequest,
@@ -233,29 +970,8 @@ def _setup_webrtc_routes(app: FastAPI, args: argparse.Namespace):
             SmallWebRTCRequestHandler,
         )
     except ImportError as e:
-        logger.error(f"WebRTC transport dependencies not installed: {e}")
+        logger.warning(f"WebRTC routes disabled after dependency check passed: {e}")
         return
-
-    class IceServer(TypedDict, total=False):
-        urls: str | list[str]
-
-    class IceConfig(TypedDict):
-        iceServers: list[IceServer]
-
-    class StartBotResult(TypedDict, total=False):
-        sessionId: str
-        iceConfig: IceConfig | None
-
-    # In-memory store of active sessions: session_id -> session info
-    active_sessions: dict[str, dict[str, Any]] = {}
-
-    # Mount the frontend
-    app.mount("/client", SmallWebRTCPrebuiltUI)
-
-    @app.get("/", include_in_schema=False)
-    async def root_redirect():
-        """Redirect root requests to client interface."""
-        return RedirectResponse(url="/client/")
 
     @app.get("/files/{filename:path}")
     async def download_file(filename: str):
@@ -272,9 +988,12 @@ def _setup_webrtc_routes(app: FastAPI, args: argparse.Namespace):
 
         return FileResponse(path=file_path, media_type=media_type, filename=file_path.name)
 
-    # Initialize the SmallWebRTC request handler
+    # Initialize the SmallWebRTC request handler. The configured ICE servers are
+    # what the bot's own peer connection uses to gather server-reflexive and
+    # relay candidates; without them it only ever offers host candidates.
+    ice_servers = [IceServer(**server) for server in args.ice_servers]
     small_webrtc_handler: SmallWebRTCRequestHandler = SmallWebRTCRequestHandler(
-        esp32_mode=args.esp32, host=args.host
+        ice_servers=ice_servers or None, esp32_mode=args.esp32, host=args.host
     )
 
     @app.post("/api/offer")
@@ -314,29 +1033,6 @@ def _setup_webrtc_routes(app: FastAPI, args: argparse.Namespace):
         logger.debug(f"Received patch request: {request}")
         await small_webrtc_handler.handle_patch_request(request)
         return {"status": "success"}
-
-    @app.post("/start")
-    async def rtvi_start(request: Request):
-        """Mimic Pipecat Cloud's /start endpoint."""
-        # Parse the request body
-        try:
-            request_data = await request.json()
-            logger.debug(f"Received request: {request_data}")
-        except Exception as e:
-            logger.error(f"Failed to parse request body: {e}")
-            request_data = {}
-
-        # Store session info immediately in memory, replicate the behavior expected on Pipecat Cloud
-        session_id = str(uuid.uuid4())
-        active_sessions[session_id] = request_data.get("body", {})
-
-        result: StartBotResult = {"sessionId": session_id}
-        if request_data.get("enableDefaultIceServers"):
-            result["iceConfig"] = IceConfig(
-                iceServers=[IceServer(urls=["stun:stun.l.google.com:19302"])]
-            )
-
-        return result
 
     @app.api_route(
         "/sessions/{session_id}/{path:path}",
@@ -436,7 +1132,7 @@ def _setup_whatsapp_routes(app: FastAPI, args: argparse.Namespace):
 
     try:
         from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
-        from pipecat.transports.whatsapp.api import WhatsAppWebhookRequest
+        from pipecat.transports.whatsapp.api import WhatsAppConnectCall, WhatsAppWebhookRequest
         from pipecat.transports.whatsapp.client import WhatsAppClient
     except ImportError as e:
         logger.error(f"WhatsApp transport dependencies not installed: {e}")
@@ -501,18 +1197,22 @@ def _setup_whatsapp_routes(app: FastAPI, args: argparse.Namespace):
 
         logger.debug(f"Processing WhatsApp webhook: {body.model_dump()}")
 
-        async def connection_callback(connection: SmallWebRTCConnection):
+        async def connection_callback(connection: SmallWebRTCConnection, call: WhatsAppConnectCall):
             """Handle new WebRTC connections from WhatsApp calls.
 
             Called when a WebRTC connection is established for a WhatsApp call.
             Spawns a bot instance to handle the conversation.
 
             Args:
-                connection: The established WebRTC connection
+                connection: The established WebRTC connection.
+                call: The WhatsApp call metadata (caller phone number, call ID,
+                    direction, timestamp, etc.), passed as ``runner_args.body``.
             """
             bot_module = _get_bot_module()
             runner_args = SmallWebRTCRunnerArguments(
-                webrtc_connection=connection, session_id=str(uuid.uuid4())
+                webrtc_connection=connection,
+                session_id=str(uuid.uuid4()),
+                body=call,
             )
             runner_args.cli_args = args
             background_tasks.add_task(bot_module.bot, runner_args)
@@ -562,13 +1262,13 @@ def _setup_whatsapp_routes(app: FastAPI, args: argparse.Namespace):
 
 def _setup_daily_routes(app: FastAPI, args: argparse.Namespace):
     """Set up Daily-specific routes."""
+    if not _transport_routes_enabled("daily"):
+        return
 
-    @app.get("/")
+    @app.get("/daily")
     async def create_room_and_start_agent():
         """Launch a Daily bot and redirect to room."""
-        print("Starting bot with Daily transport and redirecting to Daily room")
-
-        import aiohttp
+        logger.debug("Starting bot with Daily transport and redirecting to Daily room")
 
         from pipecat.runner.daily import configure
 
@@ -581,107 +1281,8 @@ def _setup_daily_routes(app: FastAPI, args: argparse.Namespace):
                 room_url=room_url, token=token, session_id=str(uuid.uuid4())
             )
             runner_args.cli_args = args
-            asyncio.create_task(bot_module.bot(runner_args))
+            _start_bot_session(bot_module.bot(runner_args))
             return RedirectResponse(room_url)
-
-    @app.post("/start")
-    async def start_agent(request: Request):
-        """Handler for /start endpoints.
-
-        Expects POST body like::
-            {
-                "createDailyRoom": true,
-                "dailyRoomProperties": { "start_video_off": true },
-                "dailyMeetingTokenProperties": { "is_owner": true, "user_name": "Bot" },
-                "body": { "custom_data": "value" }
-            }
-        """
-        print("Starting bot with Daily transport")
-
-        # Parse the request body
-        try:
-            request_data = await request.json()
-            logger.debug(f"Received request: {request_data}")
-        except Exception as e:
-            logger.error(f"Failed to parse request body: {e}")
-            request_data = {}
-
-        create_daily_room = request_data.get("createDailyRoom", False)
-        body = request_data.get("body", {})
-        daily_room_properties_dict = request_data.get("dailyRoomProperties", None)
-        daily_token_properties_dict = request_data.get("dailyMeetingTokenProperties", None)
-
-        bot_module = _get_bot_module()
-
-        existing_room_url = os.getenv("DAILY_ROOM_URL")
-
-        session_id = str(uuid.uuid4())
-        result = None
-
-        # Configure room if:
-        # 1. Explicitly requested via createDailyRoom in payload
-        # 2. Using pre-configured room from DAILY_ROOM_URL env var
-        if create_daily_room or existing_room_url:
-            import aiohttp
-
-            from pipecat.runner.daily import configure
-            from pipecat.transports.daily.utils import (
-                DailyMeetingTokenProperties,
-                DailyRoomProperties,
-            )
-
-            async with aiohttp.ClientSession() as session:
-                # Parse dailyRoomProperties if provided
-                room_properties = None
-                if daily_room_properties_dict:
-                    # Apply Pipecat Cloud's session policy if caller didn't override.
-                    daily_room_properties_dict.setdefault(
-                        "exp", time.time() + PIPECAT_ROOM_EXP_HOURS * 3600
-                    )
-                    daily_room_properties_dict.setdefault("eject_at_room_exp", True)
-                    try:
-                        room_properties = DailyRoomProperties(**daily_room_properties_dict)
-                        logger.debug(f"Using custom room properties: {room_properties}")
-                    except Exception as e:
-                        logger.error(f"Failed to parse dailyRoomProperties: {e}")
-                        # Continue without custom properties
-
-                # Parse dailyMeetingTokenProperties if provided
-                token_properties = None
-                if daily_token_properties_dict:
-                    try:
-                        token_properties = DailyMeetingTokenProperties(
-                            **daily_token_properties_dict
-                        )
-                        logger.debug(f"Using custom token properties: {token_properties}")
-                    except Exception as e:
-                        logger.error(f"Failed to parse dailyMeetingTokenProperties: {e}")
-                        # Continue without custom properties
-
-                room_url, token = await configure(
-                    session,
-                    room_exp_duration=PIPECAT_ROOM_EXP_HOURS,
-                    room_properties=room_properties,
-                    token_properties=token_properties,
-                )
-                runner_args = DailyRunnerArguments(
-                    room_url=room_url, token=token, body=body, session_id=session_id
-                )
-                result = {
-                    "dailyRoom": room_url,
-                    "dailyToken": token,
-                    "sessionId": session_id,
-                }
-        else:
-            runner_args = RunnerArguments(body=body, session_id=session_id)
-
-        # Update CLI args.
-        runner_args.cli_args = args
-
-        # Start the bot in the background
-        asyncio.create_task(bot_module.bot(runner_args))
-
-        return result
 
     if args.dialin:
 
@@ -730,8 +1331,6 @@ def _setup_daily_routes(app: FastAPI, args: argparse.Namespace):
                     status_code=400,
                     detail="Missing required fields: From, To, callId, callDomain",
                 )
-
-            import aiohttp
 
             from pipecat.runner.daily import configure
             from pipecat.runner.types import DailyDialinRequest, DialinSettings
@@ -790,7 +1389,7 @@ def _setup_daily_routes(app: FastAPI, args: argparse.Namespace):
             )
             runner_args.cli_args = args
 
-            asyncio.create_task(bot_module.bot(runner_args))
+            _start_bot_session(bot_module.bot(runner_args))
 
             # Return response matching Pipecat Cloud format
             return {
@@ -800,64 +1399,95 @@ def _setup_daily_routes(app: FastAPI, args: argparse.Namespace):
             }
 
 
-def _setup_telephony_routes(app: FastAPI, args: argparse.Namespace):
-    """Set up telephony-specific routes."""
-    # XML response templates (Exotel doesn't use XML webhooks)
-    XML_TEMPLATES = {
-        "twilio": f"""<?xml version="1.0" encoding="UTF-8"?>
+def _setup_telephony_routes(app: FastAPI, args: argparse.Namespace, ws_used_tokens: set[str]):
+    """Set up telephony-specific routes.
+
+    The WebSocket endpoint (``/ws``) is always registered so providers can
+    connect directly. The XML webhook (``POST /``) is only registered when a
+    specific telephony transport is chosen via ``-t`` because the XML template
+    is provider-specific and requires a proxy hostname (``--proxy``).
+
+    When ``args.ws_auth == "token"``, connections must present a valid HMAC
+    session token obtained via ``POST /start``. The token may be supplied as:
+
+    - ``Authorization: Bearer <token>`` header
+    - ``?token=<token>`` query parameter
+    - URL path segment: ``/ws/<token>`` (recommended for telephony providers)
+
+    Invalid or missing tokens are rejected with WebSocket close code 4003.
+    """
+    if not _transport_routes_enabled("telephony"):
+        return
+
+    if args.transport in TELEPHONY_TRANSPORTS:
+        # XML response templates (Exotel doesn't use XML webhooks)
+        XML_TEMPLATES = {
+            "twilio": f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="wss://{args.proxy}/ws"></Stream>
   </Connect>
-  <Pause length="40"/>
 </Response>""",
-        "telnyx": f"""<?xml version="1.0" encoding="UTF-8"?>
+            "telnyx": f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="wss://{args.proxy}/ws" bidirectionalMode="rtp"></Stream>
   </Connect>
-  <Pause length="40"/>
 </Response>""",
-        "plivo": f"""<?xml version="1.0" encoding="UTF-8"?>
+            "plivo": f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">wss://{args.proxy}/ws</Stream>
 </Response>""",
-    }
+        }
 
-    @app.post("/")
-    async def start_call():
-        """Handle telephony webhook and return XML response."""
-        if args.transport == "exotel":
-            # Exotel doesn't use POST webhooks - redirect to proper documentation
-            logger.debug("POST Exotel endpoint - not used")
-            return {
-                "error": "Exotel doesn't use POST webhooks",
-                "websocket_url": f"wss://{args.proxy}/ws",
-                "note": "Configure the WebSocket URL above in your Exotel App Bazaar Voicebot Applet",
-            }
-        else:
-            logger.debug(f"POST {args.transport.upper()} XML")
-            xml_content = XML_TEMPLATES.get(args.transport, "<Response></Response>")
-            return HTMLResponse(content=xml_content, media_type="application/xml")
+        @app.post("/")
+        async def start_call():
+            """Handle telephony webhook and return XML response."""
+            if args.transport == "exotel":
+                # Exotel doesn't use POST webhooks - redirect to proper documentation
+                logger.debug("POST Exotel endpoint - not used")
+                return {
+                    "error": "Exotel doesn't use POST webhooks",
+                    "websocket_url": f"wss://{args.proxy}/ws",
+                    "note": "Configure the WebSocket URL above in your Exotel App Bazaar Voicebot Applet",
+                }
+            else:
+                logger.debug(f"POST {args.transport.upper()} XML")
+                xml_content = XML_TEMPLATES.get(args.transport, "<Response></Response>")
+                return HTMLResponse(content=xml_content, media_type="application/xml")
 
-    @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket):
-        """Handle WebSocket connections for telephony."""
+    async def _handle_telephony_ws(websocket: WebSocket, path_token: str | None = None):
+        if args.ws_auth == "token":
+            token = path_token or _extract_ws_token(websocket)
+            if not token or not _verify_and_consume_ws_token(ws_used_tokens, token):
+                logger.warning("WebSocket connection rejected: invalid or missing token")
+                await websocket.close(code=4003)
+                return
+        origin = websocket.headers.get("origin", "")
+        if not is_origin_allowed(origin, args.allowed_origins):
+            logger.warning(f"WebSocket connection rejected: origin '{origin}' not allowed")
+            await websocket.close(code=4003)
+            return
         await websocket.accept()
         logger.debug("WebSocket connection accepted")
         await _run_telephony_bot(websocket, args)
 
-    @app.get("/")
-    async def start_agent():
-        """Simple status endpoint for telephony transports."""
-        return {"status": f"Bot started with {args.transport}"}
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket):
+        """Handle WebSocket connections for telephony."""
+        await _handle_telephony_ws(websocket)
+
+    @app.websocket("/ws/{token}")
+    async def websocket_endpoint_with_token(websocket: WebSocket, token: str):
+        """Handle WebSocket connections for telephony with token in the URL path."""
+        await _handle_telephony_ws(websocket, path_token=token)
 
 
 async def _run_daily_direct(args: argparse.Namespace):
     """Run Daily bot with direct connection (no FastAPI server)."""
     try:
         from pipecat.runner.daily import configure
-    except ImportError as e:
+    except ImportError:
         logger.error("Daily transport dependencies not installed.")
         return
 
@@ -883,6 +1513,49 @@ async def _run_daily_direct(args: argparse.Namespace):
         await bot_module.bot(runner_args)
 
 
+async def _run_eval(args: argparse.Namespace):
+    """Run a bot with the eval transport (no FastAPI server).
+
+    The eval transport is a ``SingleClientWebsocketServerTransport`` speaking RTVI that
+    hosts its own local WebSocket server for the harness to connect to. The
+    dev runner here just constructs ``EvalRunnerArguments`` and invokes the bot
+    function directly — no FastAPI routes are needed.
+    """
+    logger.info("Running with eval transport...")
+
+    runner_args = EvalRunnerArguments(host=args.host, port=args.port, session_id=str(uuid.uuid4()))
+    runner_args.handle_sigint = True
+    runner_args.cli_args = args
+
+    # A bot may need session data it would normally receive in the /start request
+    # body (e.g. a vision bot's image path). The eval transport has no such
+    # endpoint, so the body is read from a JSON file passed with --runner-body.
+    if args.runner_body:
+        runner_args.body = json.loads(Path(args.runner_body).read_text())
+
+    bot_module = _get_bot_module()
+    await bot_module.bot(runner_args)
+
+
+async def _run_vonage():
+    """Run Vonage bot (no FastAPI server)."""
+    logger.info("Running Vonage transport...")
+
+    application_id, session_id, token = await configure_vonage()
+    runner_args = VonageRunnerArguments(
+        application_id=application_id, vonage_session_id=session_id, token=token
+    )
+    runner_args.handle_sigint = True
+
+    # Get the bot module and run it directly
+    bot_module = _get_bot_module()
+
+    print(f"Joining Vonage session: {runner_args.vonage_session_id}")
+    print()
+
+    await bot_module.bot(runner_args)
+
+
 def _validate_and_clean_proxy(proxy: str) -> str:
     """Validate and clean proxy hostname, removing protocol if present."""
     if not proxy:
@@ -904,6 +1577,82 @@ def _validate_and_clean_proxy(proxy: str) -> str:
     return proxy
 
 
+def _parse_ice_servers(value: str | list[str] | None) -> list[dict[str, Any]]:
+    """Parse ICE server configuration into a list of plain dictionaries.
+
+    Accepts either the raw ``PIPECAT_ICE_SERVERS`` environment value (a string)
+    or the tokens collected by ``--ice-servers`` (a list of strings). Each entry
+    is either a bare STUN or TURN URL, or a JSON object with ``urls`` and, for
+    TURN, ``username`` and ``credential``. A string value is read as a whole JSON
+    array when it starts with ``[`` and as a single JSON object when it starts
+    with ``{``; anything else is split on commas into bare URLs.
+
+    Dictionaries are returned rather than ``IceServer`` objects so this stays
+    usable when the WebRTC extra is not installed, and so the same values can be
+    handed to WebRTC clients as JSON.
+
+    Args:
+        value: The raw environment value, the parsed CLI tokens, or None.
+
+    Returns:
+        ICE servers as dictionaries with ``urls`` and optional credentials.
+
+    Raises:
+        ValueError: If an entry is malformed, is missing ``urls``, or carries a
+            key other than ``urls``, ``username``, or ``credential``.
+    """
+    if not value:
+        return []
+
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                entries: list[Any] = json.loads(text)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"could not parse {text!r} as a JSON array: {e}") from e
+            if not isinstance(entries, list):
+                raise ValueError(f"expected a JSON array of ICE servers, got {text!r}")
+        elif text.startswith("{"):
+            entries = [text]
+        else:
+            entries = [item.strip() for item in text.split(",") if item.strip()]
+    else:
+        entries = list(value)
+
+    allowed_keys = {"urls", "username", "credential"}
+    ice_servers: list[dict[str, Any]] = []
+
+    for entry in entries:
+        if isinstance(entry, str):
+            text = entry.strip()
+            if not text:
+                continue
+            if not text.startswith("{"):
+                ice_servers.append({"urls": text})
+                continue
+            try:
+                entry = json.loads(text)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"could not parse {text!r} as a JSON object: {e}") from e
+
+        if not isinstance(entry, dict):
+            raise ValueError(f"expected a URL or a JSON object, got {entry!r}")
+
+        unknown = set(entry) - allowed_keys
+        if unknown:
+            raise ValueError(
+                f"unsupported key(s) {sorted(unknown)} in {entry!r}; "
+                f"supported keys are {sorted(allowed_keys)}"
+            )
+        if not entry.get("urls"):
+            raise ValueError(f"missing 'urls' in {entry!r}")
+
+        ice_servers.append({key: entry[key] for key in entry if entry[key] is not None})
+
+    return ice_servers
+
+
 def runner_downloads_folder() -> str | None:
     """Returns the folder where files are stored for later download."""
     return RUNNER_DOWNLOADS_FOLDER
@@ -922,22 +1671,31 @@ def runner_port() -> int:
 def main(parser: argparse.ArgumentParser | None = None):
     """Start the Pipecat development runner.
 
-    Parses command-line arguments and starts a FastAPI server configured
-    for the specified transport type.
+    Parses command-line arguments and starts a FastAPI server that supports
+    WebRTC, Daily, and telephony transports simultaneously. Clients declare
+    which transport to use via the ``transport`` field in the ``/start`` body.
+
+    When ``-t`` is provided, the server restricts ``/start`` to that transport
+    only and displays transport-specific startup information.
 
     The runner discovers and runs any ``bot(runner_args)`` function found in the
     calling module.
 
     Command-line arguments:
-       - --host: Server host address (default: localhost) 879
+       - --host: Server host address (default: localhost)
        - --port: Server port (default: 7860)
-       - -t/--transport: Transport type (daily, webrtc, twilio, telnyx, plivo, exotel)
+       - -t/--transport: Restrict to a single transport and set as default for /start
+         (daily, livekit, webrtc, websocket, twilio, telnyx, plivo, exotel). Omit to support
+         all transports.
        - -x/--proxy: Public proxy hostname for telephony webhooks
        - -d/--direct: Connect directly to Daily room (automatically sets transport to daily)
        - -f/--folder: Path to downloads folder
-       - --dialin: Enable Daily PSTN dial-in webhook handling (requires Daily transport)
+       - --dialin/--no-dialin: Mount the Daily PSTN dial-in webhook for -t daily
+         (on by default; --no-dialin disables it)
        - --esp32: Enable SDP munging for ESP32 compatibility (requires --host with IP address)
-       - --whatsapp: Ensure requried WhatsApp environment variables are present
+       - --ice-servers: STUN and TURN servers for the WebRTC transport, as bare URLs or as
+         JSON objects when credentials are needed (default: the PIPECAT_ICE_SERVERS env var)
+       - --whatsapp: Ensure required WhatsApp environment variables are present
        - -v/--verbose: Increase logging verbosity
 
     Args:
@@ -957,9 +1715,21 @@ def main(parser: argparse.ArgumentParser | None = None):
         "-t",
         "--transport",
         type=str,
-        choices=["daily", "webrtc", *TELEPHONY_TRANSPORTS],
-        default="webrtc",
-        help="Transport type",
+        choices=[
+            "daily",
+            "eval",
+            "livekit",
+            "moq",
+            "vonage",
+            "webrtc",
+            "websocket",
+            *TELEPHONY_TRANSPORTS,
+        ],
+        default=None,
+        help=(
+            "Restrict the server to a single transport and set it as the default for /start. "
+            "Omit to support all transports simultaneously (default behaviour)."
+        ),
     )
     parser.add_argument("-x", "--proxy", help="Public proxy host name")
     parser.add_argument(
@@ -971,13 +1741,22 @@ def main(parser: argparse.ArgumentParser | None = None):
     )
     parser.add_argument("-f", "--folder", type=str, help="Path to downloads folder")
     parser.add_argument(
+        "--runner-body",
+        type=str,
+        default=None,
+        help="Path to a JSON file with the runner args body (e.g. a vision bot's image path under -t eval)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0, help="Increase logging verbosity"
     )
     parser.add_argument(
         "--dialin",
-        action="store_true",
-        default=False,
-        help="Enable Daily PSTN dial-in webhook handling (requires Daily transport)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Mount the Daily PSTN dial-in webhook for -t daily. On by default (a local "
+            "stand-in for Pipecat Cloud's dial-in handler); use --no-dialin to disable."
+        ),
     )
     parser.add_argument(
         "--esp32",
@@ -989,7 +1768,154 @@ def main(parser: argparse.ArgumentParser | None = None):
         "--whatsapp",
         action="store_true",
         default=False,
-        help="Ensure requried WhatsApp environment variables are present",
+        help="Ensure required WhatsApp environment variables are present",
+    )
+    parser.add_argument(
+        "--ws-auth",
+        dest="ws_auth",
+        choices=["none", "token"],
+        default=os.getenv("PIPECAT_WEBSOCKET_AUTH", "none"),
+        help=(
+            "WebSocket authentication mode. 'token' requires clients to call /start "
+            "and obtain a signed HMAC session token before connecting to /ws or "
+            "/ws-client. Defaults to the PIPECAT_WEBSOCKET_AUTH environment variable "
+            "or 'none'."
+        ),
+    )
+    parser.add_argument(
+        "--ice-servers",
+        dest="ice_servers",
+        nargs="*",
+        default=os.getenv("PIPECAT_ICE_SERVERS"),
+        metavar="SERVER",
+        help=(
+            "STUN and TURN servers the WebRTC transport should use, given as bare URLs "
+            "(e.g. stun:stun.l.google.com:19302) or, when a TURN server needs credentials, "
+            'as JSON objects (e.g. \'{"urls": "turn:turn.example.com:3478", '
+            '"username": "user", "credential": "pass"}\'). Defaults to the PIPECAT_ICE_SERVERS '
+            "environment variable, which takes the same entries comma-separated or as a "
+            "JSON array. Without this the bot gathers host candidates only."
+        ),
+    )
+    _env_origins = [
+        o.strip() for o in os.getenv("PIPECAT_ALLOWED_ORIGINS", "").split(",") if o.strip()
+    ]
+    parser.add_argument(
+        "--allowed-origins",
+        dest="allowed_origins",
+        nargs="*",
+        default=_env_origins,
+        help=(
+            "Allowed origins for HTTP and WebSocket connections (e.g. https://example.com). "
+            "Omit or leave empty to allow all origins. "
+            "Defaults to the PIPECAT_ALLOWED_ORIGINS environment variable "
+            "(comma-separated)."
+        ),
+    )
+
+    # MOQ-specific arguments.
+    #
+    # Mode is selected by --moq-connect:
+    #   server (default): bot binds its own UDP socket at --moq-bind and
+    #           needs --moq-tls-cert/--moq-tls-key (prod) or
+    #           --moq-tls-generate <hostname> (dev).
+    #   client (--moq-connect <url>): bot and browser both dial that relay
+    #           and rendezvous on a shared namespace.
+    parser.add_argument(
+        "--moq-connect",
+        type=str,
+        default=None,
+        metavar="URL",
+        help=(
+            "Relay URL for both the bot and the browser to dial, e.g. "
+            "https://cdn.moq.dev/anon. Passing this selects client mode; "
+            "without it the bot serves its own socket. "
+            "Format: <scheme>://<host>[:port]<path>."
+        ),
+    )
+    parser.add_argument(
+        "--moq-bind",
+        type=str,
+        default=None,
+        metavar="ADDR:PORT",
+        help=(
+            "Local UDP bind address. Serve mode: the listen address "
+            f"(default: {DEFAULT_MOQ_SERVE_BIND}). Client mode: the dial "
+            "source address (an ephemeral port if unset)."
+        ),
+    )
+    parser.add_argument(
+        "--moq-serve",
+        action="store_true",
+        default=None,
+        help=(
+            "Run the bot as a MOQ server — the bot binds its own UDP socket and "
+            "accepts the browser's direct connection (no separate moq-relay needed). "
+            "Requires --moq-tls-cert/--moq-tls-key (production) or "
+            "--moq-tls-generate <hostname> (self-signed dev cert). This is already "
+            "the default, so it's only needed to override a --moq-connect relay."
+        ),
+    )
+    parser.add_argument(
+        "--moq-namespace",
+        type=str,
+        default=None,
+        help=(
+            "MOQ namespace/room. Defaults to 'pipecat' in server mode. In client "
+            "mode each session gets its own random namespace instead, since the "
+            "relay is shared — set this only to pin a well-known room."
+        ),
+    )
+    parser.add_argument(
+        "--moq-bot-id",
+        type=str,
+        default=DEFAULT_MOQ_BOT_ID,
+        help="This bot's participant id; it publishes under <namespace>/<bot-id> (default: response, the direction the bot carries)",
+    )
+    parser.add_argument(
+        "--moq-client-id",
+        type=str,
+        default=DEFAULT_MOQ_CLIENT_ID,
+        help="The peer's participant id; the bot subscribes to <namespace>/<client-id> (default: request)",
+    )
+    parser.add_argument(
+        "--moq-tls-cert",
+        type=str,
+        default=None,
+        metavar="PEM",
+        help=(
+            "Path to a PEM-encoded TLS certificate chain. In server mode, used as the "
+            "listening server's cert (pair with --moq-tls-key). In client mode, used "
+            "only to send the fingerprint to the browser for WebTransport cert pinning "
+            "against a self-signed relay (a CA-signed relay needs no pinning)."
+        ),
+    )
+    parser.add_argument(
+        "--moq-tls-key",
+        type=str,
+        default=None,
+        metavar="PEM",
+        help=("Path to the PEM-encoded private key matching --moq-tls-cert (server mode)."),
+    )
+    parser.add_argument(
+        "--moq-tls-insecure",
+        action="store_true",
+        default=False,
+        help=(
+            "Dev only: disable TLS certificate verification when dialing the relay. "
+            "Ignored in server mode."
+        ),
+    )
+    parser.add_argument(
+        "--moq-tls-generate",
+        type=str,
+        default=None,
+        metavar="HOSTNAME",
+        help=(
+            "Server mode, dev only: generate a self-signed TLS cert for HOSTNAME. "
+            "Defaults to a self-signed cert for localhost when no TLS config is "
+            "given at all. Mutually exclusive with --moq-tls-cert/--moq-tls-key."
+        ),
     )
 
     args = parser.parse_args()
@@ -998,11 +1924,27 @@ def main(parser: argparse.ArgumentParser | None = None):
     if args.proxy:
         args.proxy = _validate_and_clean_proxy(args.proxy)
 
-    # Auto-set transport to daily if --direct is used without explicit transport
-    if args.direct and args.transport == "webrtc":  # webrtc is the default
-        args.transport = "daily"
-    elif args.direct and args.transport != "daily":
-        logger.error("--direct flag only works with Daily transport (-t daily)")
+    # Normalize ICE servers from either the CLI tokens or PIPECAT_ICE_SERVERS
+    try:
+        args.ice_servers = _parse_ice_servers(args.ice_servers)
+    except ValueError as e:
+        logger.error(f"Invalid ICE server configuration: {e}")
+        return
+
+    # --direct implies Daily transport
+    if args.direct:
+        if args.transport is None or args.transport == "daily":
+            args.transport = "daily"
+        else:
+            logger.error("--direct flag only works with Daily transport (-t daily)")
+            return
+
+    # Resolve MoQ args (parses --moq-connect, applies serve-mode defaults,
+    # warns on conflicting flags). Stashes derived host/port/path/bind on `args`.
+    # Always run this — not just for -t moq — so args.moq_host etc. are populated
+    # whenever a client requests the moq transport at /start, even when the runner
+    # supports all transports (args.transport is None).
+    if not _validate_moq_args(args):
         return
 
     # Validate ESP32 requirements
@@ -1010,14 +1952,15 @@ def main(parser: argparse.ArgumentParser | None = None):
         logger.error("For ESP32, you need to specify `--host IP` so we can do SDP munging.")
         return
 
-    # Validate dial-in requirements
-    if args.dialin and args.transport != "daily":
-        logger.error("--dialin flag only works with Daily transport (-t daily)")
-        return
+    # The dial-in webhook is mounted only inside _setup_daily_routes, so --dialin is a
+    # no-op for non-Daily transports; nothing to validate here.
 
     # Log level
     logger.remove()
     logger.add(sys.stderr, level="TRACE" if args.verbose else "DEBUG")
+
+    # Print overall dev runner banner
+    _print_dev_runner_banner()
 
     # Handle direct Daily connection (no FastAPI server)
     if args.direct:
@@ -1029,28 +1972,21 @@ def main(parser: argparse.ArgumentParser | None = None):
         asyncio.run(_run_daily_direct(args))
         return
 
-    # Print startup message for server-based transports
-    if args.transport == "webrtc":
+    # Handle eval transport (no FastAPI server — the WebSocket server transport
+    # runs its own WS server)
+    if args.transport == "eval":
         print()
-        if args.esp32:
-            print(f"🚀 Bot ready! (ESP32 mode)")
-        elif args.whatsapp:
-            print(f"🚀 Bot ready! (WhatsApp)")
-        else:
-            print(f"🚀 Bot ready!")
-        print(f"   → Open http://{args.host}:{args.port}/client in your browser")
+        print(f"🚀 Bot ready! (eval transport on ws://{args.host}:{args.port})")
         print()
-    elif args.transport == "daily":
+        asyncio.run(_run_eval(args))
+        return
+
+    # Print startup message
+    _print_startup_message(args)
+    if args.transport == "vonage":
+        asyncio.run(_run_vonage())
         print()
-        print(f"🚀 Bot ready!")
-        if args.dialin:
-            print(
-                f"   → Daily dial-in webhook: http://{args.host}:{args.port}/daily-dialin-webhook"
-            )
-            print(f"   → Configure this URL in your Daily phone number settings")
-        else:
-            print(f"   → Open http://{args.host}:{args.port} in your browser to start a session")
-        print()
+        return
 
     RUNNER_DOWNLOADS_FOLDER = args.folder
     RUNNER_HOST = args.host

@@ -9,9 +9,8 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import (
     Frame,
     LLMFullResponseEndFrame,
@@ -23,8 +22,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.pipeline.parallel_pipeline import ParallelPipeline
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -44,20 +42,23 @@ from pipecat.services.moondream.vision import MoondreamService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
 
-async def fetch_user_image(params: FunctionCallParams):
+async def fetch_user_image(params: FunctionCallParams, user_id: str, question: str):
     """Fetch the user image.
 
     When called, this function pushes a UserImageRequestFrame upstream to the
     transport. As a result, the transport will request the user image and push a
     UserImageRawFrame downstream. The result_callback will be invoked once the
     image is retrieved and processed.
+
+    Args:
+        user_id: The ID of the user to grab the image from.
+        question: The question that the user is asking about the image.
     """
-    user_id = params.arguments["user_id"]
-    question = params.arguments["question"]
     logger.debug(f"Requesting image with user_id={user_id}, question={question}")
 
     # Request a user image frame. In this case, we don't want the requested
@@ -101,6 +102,10 @@ class MoondreamTextFrameWrapper(FrameProcessor):
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -115,14 +120,14 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
         ),
     )
 
@@ -132,30 +137,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             system_instruction="You are a helpful assistant in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Respond to what the user said in a creative, helpful, and brief way. You are able to describe images from the user camera.",
         ),
     )
-    llm.register_function("fetch_user_image", fetch_user_image)
 
     @llm.event_handler("on_function_calls_started")
     async def on_function_calls_started(service, function_calls):
         await tts.queue_frame(TTSSpeakFrame("Let me check on that."))
 
-    fetch_image_function = FunctionSchema(
-        name="fetch_user_image",
-        description="Called when the user requests a description of their camera feed",
-        properties={
-            "user_id": {
-                "type": "string",
-                "description": "The ID of the user to grab the image from",
-            },
-            "question": {
-                "type": "string",
-                "description": "The question that the user is asking about the image",
-            },
-        },
-        required=["user_id", "question"],
-    )
-    tools = ToolsSchema(standard_tools=[fetch_image_function])
-
-    context = LLMContext(tools=tools)
+    context = LLMContext(tools=[fetch_user_image])
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -185,10 +172,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ]
     )
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
@@ -206,16 +198,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 "content": f"Please introduce yourself to the user. Use '{client_id}' as the user ID during function calls.",
             }
         )
-        await task.queue_frames([LLMRunFrame()])
+        await worker.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await task.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

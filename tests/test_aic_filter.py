@@ -34,40 +34,13 @@ def _model_manager_ref_count(manager, key: str) -> int:
         return entry[1] if entry else 0
 
 
-class MockProcessor:
-    """A lightweight mock for AIC ProcessorAsync that mimics real behavior."""
-
-    def __init__(self):
-        self.processor_ctx = MockProcessorContext()
-        self.vad_ctx = MockVadContext()
-
-    def get_processor_context(self):
-        return self.processor_ctx
-
-    def get_vad_context(self):
-        return self.vad_ctx
-
-    async def process_async(self, audio_array):
-        # Return a copy of the input (simulating passthrough)
-        return audio_array.copy()
-
-
-class MockProcessorContext:
-    """A lightweight mock for AIC ProcessorContext."""
-
-    def __init__(self):
-        self.parameters_set: list[tuple] = []
-        self.reset_called = False
-        self._output_delay = 0
-
-    def get_output_delay(self):
-        return self._output_delay
-
-    def set_parameter(self, param, value):
-        self.parameters_set.append((param, value))
-
-    def reset(self):
-        self.reset_called = True
+from tests.aic_mocks import (  # noqa: E402
+    MockModel,
+    MockProcessorContext,
+)
+from tests.aic_mocks import (
+    MockProcessorAsync as MockProcessor,
+)
 
 
 class UnsupportedEnhancementProcessorContext(MockProcessorContext):
@@ -84,39 +57,6 @@ class UnsupportedEnhancementProcessorContext(MockProcessorContext):
             self.enhancement_attempts += 1
             raise self._error_type("EnhancementLevel out of range")
         super().set_parameter(param, value)
-
-
-class MockVadContext:
-    """A lightweight mock for AIC VadContext."""
-
-    def __init__(self, speech_detected: bool = False):
-        self.speech_detected = speech_detected
-        self.parameters_set: list[tuple] = []
-
-    def is_speech_detected(self) -> bool:
-        return self.speech_detected
-
-    def set_parameter(self, param, value):
-        self.parameters_set.append((param, value))
-
-
-class MockModel:
-    """A lightweight mock for AIC Model."""
-
-    def __init__(self, model_id: str = "test-model"):
-        self._model_id = model_id
-        self._optimal_num_frames = 160
-        self._optimal_sample_rate = 16000
-
-    def get_optimal_num_frames(self, sample_rate: int):
-        """Return optimal number of frames for the given sample rate."""
-        return self._optimal_num_frames
-
-    def get_id(self):
-        return self._model_id
-
-    def get_optimal_sample_rate(self):
-        return self._optimal_sample_rate
 
 
 @unittest.skipUnless(HAS_AIC_SDK, "aic-sdk not installed")
@@ -282,7 +222,6 @@ class TestAICFilter(unittest.IsolatedAsyncioTestCase):
             mock_config_cls.optimal.assert_called_once()
             mock_processor_cls.assert_called_once()
             self.assertIsNotNone(filter_instance._processor_ctx)
-            self.assertIsNotNone(filter_instance._vad_ctx)
 
     async def test_start_applies_initial_bypass_parameter(self):
         """Test that start applies bypass parameter."""
@@ -351,10 +290,9 @@ class TestAICFilter(unittest.IsolatedAsyncioTestCase):
             await filter_instance.stop()
 
         mock_release.assert_called_once_with(cache_key)
-        self.assertTrue(self.mock_processor.processor_ctx.reset_called)
+        self.assertTrue(self.mock_processor.terminated)
         self.assertIsNone(filter_instance._processor)
         self.assertIsNone(filter_instance._processor_ctx)
-        self.assertIsNone(filter_instance._vad_ctx)
         self.assertIsNone(filter_instance._model)
         self.assertIsNone(filter_instance._model_cache_key)
         self.assertFalse(filter_instance._aic_ready)
@@ -651,47 +589,16 @@ class TestAICFilter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(output_audio), 320)  # 1 frame
         self.assertEqual(len(filter_instance._audio_buffer), 180)  # 90 samples * 2 bytes
 
-    async def test_get_vad_context_before_start(self):
-        """Test that get_vad_context raises before start."""
-        filter_instance = self._create_filter_with_mocks()
-
-        with self.assertRaises(RuntimeError) as context:
-            filter_instance.get_vad_context()
-
-        self.assertIn("not initialized", str(context.exception))
-
-    async def test_get_vad_context_after_start(self):
-        """Test that get_vad_context returns context after start."""
+    async def test_filter_passes_audio_through_after_stop(self):
+        """Test a late chunk after stop is passed through instead of erroring."""
         filter_instance = self._create_filter_with_mocks()
         await self._start_filter_with_mocks(filter_instance)
+        await filter_instance.stop()
 
-        vad_ctx = filter_instance.get_vad_context()
+        samples = np.random.randint(-32768, 32767, size=160, dtype=np.int16)
+        input_audio = samples.tobytes()
 
-        self.assertEqual(vad_ctx, self.mock_processor.vad_ctx)
-
-    async def test_create_vad_analyzer(self):
-        """Test create_vad_analyzer returns analyzer with factory."""
-        filter_instance = self._create_filter_with_mocks()
-
-        analyzer = filter_instance.create_vad_analyzer()
-
-        self.assertIsNotNone(analyzer)
-        # Factory should be set
-        self.assertIsNotNone(analyzer._vad_context_factory)
-
-    async def test_create_vad_analyzer_with_params(self):
-        """Test create_vad_analyzer with custom parameters."""
-        filter_instance = self._create_filter_with_mocks()
-
-        analyzer = filter_instance.create_vad_analyzer(
-            speech_hold_duration=0.1,
-            minimum_speech_duration=0.05,
-            sensitivity=8.0,
-        )
-
-        self.assertEqual(analyzer._pending_speech_hold_duration, 0.1)
-        self.assertEqual(analyzer._pending_minimum_speech_duration, 0.05)
-        self.assertEqual(analyzer._pending_sensitivity, 8.0)
+        self.assertEqual(await filter_instance.filter(input_audio), input_audio)
 
     async def test_multiple_start_stop_cycles(self):
         """Test multiple start/stop cycles."""
@@ -825,6 +732,23 @@ class TestAICFilter(unittest.IsolatedAsyncioTestCase):
             self.AICFilter(license_key="test-key", model_id="test-model")
 
             mock_set_sdk_id.assert_called_once_with(6)
+
+    async def test_apply_bypass_noop_without_processor_ctx(self):
+        """_apply_bypass returns early when the processor context isn't initialized."""
+        filter_instance = self._create_filter_with_mocks()
+        self.assertIsNone(filter_instance._processor_ctx)
+        # Must not raise.
+        filter_instance._apply_bypass()
+
+    async def test_filter_enable_frame_swallows_set_parameter_exception(self):
+        """process_frame logs and continues if _apply_bypass / _apply_enhancement_level raises."""
+        filter_instance = self._create_filter_with_mocks(enhancement_level=0.5)
+        await self._start_filter_with_mocks(filter_instance)
+        # Force the bypass path to raise; process_frame must swallow it.
+        with patch.object(filter_instance, "_apply_bypass", side_effect=RuntimeError("boom")):
+            await filter_instance.process_frame(self.FilterEnableFrame(enable=True))
+        # Filter state still updated to reflect the requested enable.
+        self.assertFalse(filter_instance._bypass)
 
 
 if __name__ == "__main__":

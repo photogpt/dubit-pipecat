@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import aiohttp
+import websockets
 from loguru import logger
+from websockets.protocol import State
 
 from pipecat import version as pipecat_version
 from pipecat.frames.frames import (
@@ -26,12 +28,13 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InterimTranscriptionFrame,
-    StartFrame,
+    ProposedUserStartedSpeakingFrame,
+    ProposedUserStoppedSpeakingFrame,
+    STTMetadataFrame,
     TranscriptionFrame,
     TranslationFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
 )
+from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.services.gladia.config import (
     GladiaInputParams,
     LanguageConfig,
@@ -39,21 +42,14 @@ from pipecat.services.gladia.config import (
     PreProcessingConfig,
     RealtimeProcessingConfig,
 )
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, assert_given
+from pipecat.services.settings import STTSettings
 from pipecat.services.stt_latency import GLADIA_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_stt
-
-try:
-    import websockets
-    from websockets.asyncio.client import connect as websocket_connect
-    from websockets.protocol import State
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error("In order to use Gladia, you need to `pip install pipecat-ai[gladia]`.")
-    raise Exception(f"Missing module: {e}")
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 
 def language_to_gladia_language(language: Language) -> str:
@@ -189,20 +185,18 @@ class GladiaSTTSettings(STTSettings):
         enable_vad: Enable VAD to trigger end of utterance detection.
     """
 
-    language_config: LanguageConfig | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    custom_metadata: dict[str, Any] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    endpointing: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    maximum_duration_without_endpointing: int | None | _NotGiven = field(
+    language_config: LanguageConfig | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    custom_metadata: dict[str, Any] | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    endpointing: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    maximum_duration_without_endpointing: int | None | NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
-    pre_processing: PreProcessingConfig | None | _NotGiven = field(
+    pre_processing: PreProcessingConfig | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    realtime_processing: RealtimeProcessingConfig | None | NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
-    realtime_processing: RealtimeProcessingConfig | None | _NotGiven = field(
-        default_factory=lambda: NOT_GIVEN
-    )
-    messages_config: MessagesConfig | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    enable_vad: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    messages_config: MessagesConfig | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    enable_vad: bool | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class GladiaSTTService(WebsocketSTTService):
@@ -252,12 +246,14 @@ class GladiaSTTService(WebsocketSTTService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GladiaSTTService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             params: Additional configuration parameters for Gladia service.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GladiaSTTService.Settings(...)`` for runtime-updatable
                     fields and direct init parameters for encoding/bit_depth/channels.
+                    Will be removed in 2.0.0.
 
             vad_enabled: Dubit pipeline mode. When enabled, final
                 transcriptions are wrapped with ordered
@@ -265,7 +261,10 @@ class GladiaSTTService(WebsocketSTTService):
                 markers.
             max_buffer_size: Maximum size of audio buffer in bytes. Defaults to 20MB.
             should_interrupt: Determine whether the bot should be interrupted when
-                Gladia VAD detects user speech. Defaults to True.
+                Gladia VAD detects user speech. Passed along to the user turn
+                strategies this service recommends, which own the interruption; a
+                user-supplied ``user_turn_strategies`` overrides the recommendation
+                and this setting with it. Defaults to True.
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
             ttfs_p99_latency: P99 latency from speech end to final transcript in seconds.
@@ -365,6 +364,22 @@ class GladiaSTTService(WebsocketSTTService):
         """
         return True
 
+    def service_metadata_frame(self) -> STTMetadataFrame:
+        """Request external turn strategies when Gladia's VAD drives endpointing.
+
+        With ``enable_vad`` set, Gladia detects end of utterance server-side and
+        emits ``ProposedUserStarted/StoppedSpeakingFrame``, so the user aggregator
+        resolves those rather than running local VAD/smart-turn. Without it the
+        defaults are left in place. Applied unless the user passed their own
+        ``user_turn_strategies``.
+        """
+        frame = super().service_metadata_frame()
+        if self._settings.enable_vad:
+            frame.user_turn_strategies = ExternalUserTurnStrategies(
+                enable_interruptions=self._should_interrupt,
+            )
+        return frame
+
     def language_to_service_language(self, language: Language) -> str | None:
         """Convert pipecat Language enum to Gladia's language code.
 
@@ -421,13 +436,13 @@ class GladiaSTTService(WebsocketSTTService):
 
         return settings
 
-    async def start(self, frame: StartFrame):
-        """Start the Gladia STT websocket connection.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service and connect.
 
         Args:
-            frame: The start frame triggering service startup.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
         await self._connect()
 
     async def _update_settings(self, delta: Settings) -> dict[str, Any]:
@@ -463,9 +478,12 @@ class GladiaSTTService(WebsocketSTTService):
         Args:
             frame: The end frame triggering service shutdown.
         """
-        await super().stop(frame)
+        # stop_recording ends the session server-side and has to reach the
+        # socket before teardown closes it. Trailing transcripts are not
+        # waited for: Gladia finalizes the session and its stored result
+        # either way.
         await self._send_stop_recording()
-        await self._disconnect()
+        await super().stop(frame)
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the Gladia STT websocket connection.
@@ -485,8 +503,6 @@ class GladiaSTTService(WebsocketSTTService):
         Yields:
             None (processing is handled asynchronously via WebSocket).
         """
-        await self.start_processing_metrics()
-
         # Add audio to buffer
         async with self._buffer_lock:
             self._audio_buffer.extend(audio)
@@ -552,7 +568,7 @@ class GladiaSTTService(WebsocketSTTService):
 
             if self._session_url is None:
                 raise RuntimeError(f"{self} session URL is not initialized")
-            self._websocket = await websocket_connect(self._session_url)
+            self._websocket = await self._websocket_connect(self._session_url)
             self._connection_active = True
 
             # Reset byte tracking for new connection
@@ -566,8 +582,9 @@ class GladiaSTTService(WebsocketSTTService):
 
             logger.debug(f"{self} Connected to Gladia WebSocket")
         except Exception as e:
+            self._websocket = None
+            self._connection_active = False
             await self.push_error(error_msg=f"Unable to connect to Gladia: {e}", exception=e)
-            raise
 
     async def _disconnect_websocket(self):
         """Close the websocket connection to Gladia."""
@@ -607,7 +624,7 @@ class GladiaSTTService(WebsocketSTTService):
     async def _handle_transcription(
         self, transcript: str, is_final: bool, language: str | None = None
     ):
-        await self.stop_processing_metrics()
+        pass
 
     async def _on_speech_started(self):
         """Handle speech start event from Gladia.
@@ -624,9 +641,7 @@ class GladiaSTTService(WebsocketSTTService):
         logger.debug(f"{self} User started speaking")
         self._is_speaking = True
 
-        await self.broadcast_frame(UserStartedSpeakingFrame)
-        if self._should_interrupt:
-            await self.broadcast_interruption()
+        await self.broadcast_frame(ProposedUserStartedSpeakingFrame)
 
     async def _on_speech_ended(self):
         """Handle speech end event from Gladia.
@@ -639,7 +654,7 @@ class GladiaSTTService(WebsocketSTTService):
         if not self._settings.enable_vad or not self._is_speaking:
             return
         self._is_speaking = False
-        await self.broadcast_frame(UserStoppedSpeakingFrame)
+        await self.broadcast_frame(ProposedUserStoppedSpeakingFrame)
         logger.debug(f"{self} User stopped speaking")
 
     async def _send_audio(self, audio: bytes):
@@ -699,6 +714,10 @@ class GladiaSTTService(WebsocketSTTService):
                     transcript = utterance["text"]
                     is_final = content["data"]["is_final"]
                     if is_final:
+                        # Report usage before the transcription frame so
+                        # tracing can attach it to the STT span the frame
+                        # closes.
+                        await self.emit_stt_usage_metrics()
                         # Dubit Edit: vad_enabled preserves Dubit ordering around final transcripts.
                         await self._push_transcription_with_turn_frames(
                             TranscriptionFrame(

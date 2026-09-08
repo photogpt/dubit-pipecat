@@ -12,15 +12,14 @@ with configurable session timeouts and WAV header generation.
 """
 
 import asyncio
-import io
 import time
 import typing
-import wave
 from collections.abc import Awaitable, Callable
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from pipecat.audio.utils import pcm_to_wav
 from pipecat.frames.frames import (
     CancelFrame,
     ClientConnectedFrame,
@@ -34,11 +33,12 @@ from pipecat.frames.frames import (
     OutputTransportMessageUrgentFrame,
     StartFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.utils.security.allowed_origins import default_allowed_origins, is_origin_allowed
 
 try:
     from fastapi import WebSocket
@@ -46,9 +46,14 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error(
-        "In order to use FastAPI websockets, you need to `pip install pipecat-ai[websocket]`."
+        'In order to use FastAPI websockets, you need to `uv add "pipecat-ai[websocket]"`.'
     )
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
+
+
+# Default time (in seconds) to wait for the WebSocket close handshake in
+# ``FastAPIWebsocketClient.disconnect()`` before proceeding with shutdown.
+_WS_CLOSE_TIMEOUT_DEFAULT = 0.5
 
 
 class FastAPIWebsocketParams(TransportParams):
@@ -60,12 +65,27 @@ class FastAPIWebsocketParams(TransportParams):
         session_timeout: Session timeout in seconds, None for no timeout.
         fixed_audio_packet_size: Optional fixed-size packetization for raw PCM audio payloads.
             Useful when the remote WebSocket media endpoint requires strict audio framing.
+        allowed_origins: List of allowed origins. Empty list allows all
+            origins. When set, connections with a missing or disallowed Origin header
+            are rejected. Defaults to ``PIPECAT_ALLOWED_ORIGINS`` env var
+            (comma-separated).
+        ws_close_timeout: Maximum time, in seconds, to wait for the WebSocket
+            close handshake during disconnect. The close is initiated in a
+            background task before we start waiting, so the close frame is sent
+            to the peer in the common case; this only bounds how long we wait
+            for the peer to acknowledge it before letting shutdown proceed.
+            Prevents a dead or half-closed peer (e.g. a telephony call already
+            torn down on the provider's side) from stalling pipeline shutdown on
+            the ASGI server's close-handshake timeout. Increase it for
+            high-latency peers that need longer to complete a graceful close.
     """
 
     add_wav_header: bool = False
     serializer: FrameSerializer | None = None
     session_timeout: int | None = None
     fixed_audio_packet_size: int | None = None
+    allowed_origins: list[str] = Field(default_factory=default_allowed_origins)
+    ws_close_timeout: float = _WS_CLOSE_TIMEOUT_DEFAULT
 
 
 class FastAPIWebsocketCallbacks(BaseModel):
@@ -109,19 +129,28 @@ class FastAPIWebsocketClient:
     with support for both binary and text message types.
     """
 
-    def __init__(self, websocket: WebSocket, callbacks: FastAPIWebsocketCallbacks):
+    def __init__(
+        self,
+        websocket: WebSocket,
+        callbacks: FastAPIWebsocketCallbacks,
+        ws_close_timeout: float = _WS_CLOSE_TIMEOUT_DEFAULT,
+    ):
         """Initialize the WebSocket client.
 
         Args:
             websocket: The FastAPI WebSocket connection.
             callbacks: Event callback functions.
+            ws_close_timeout: Maximum time, in seconds, to wait for the close
+                handshake in ``disconnect()`` before proceeding.
         """
         self._websocket = websocket
         self._closing = False
         self._callbacks = callbacks
         self._leave_counter = 0
+        self._ws_close_timeout = ws_close_timeout
+        self._close_task: asyncio.Task | None = None
 
-    async def setup(self, _: StartFrame):
+    async def setup(self, _: FrameProcessorSetup):
         """Set up the WebSocket client.
 
         Args:
@@ -155,17 +184,45 @@ class FastAPIWebsocketClient:
             )
 
     async def disconnect(self):
-        """Disconnect the WebSocket client."""
+        """Disconnect the WebSocket client.
+
+        The close handshake is bounded by ``ws_close_timeout``. The close is
+        initiated in a background task before we start waiting, so the close
+        frame is sent to the peer in the common case; we then wait at most
+        ``ws_close_timeout`` seconds for the peer to acknowledge it. If the peer
+        never replies (e.g. a half-closed connection after the remote side
+        already hung up), we stop waiting and let shutdown proceed instead of
+        blocking on the ASGI server's close-handshake timeout. The close task is
+        left running and its eventual result is logged, since the underlying
+        ``close()`` may not respond to cancellation.
+        """
         self._leave_counter -= 1
         if self._leave_counter > 0:
             return
 
         if self.is_connected and not self.is_closing:
             self._closing = True
-            try:
-                await self._websocket.close()
-            except Exception as e:
-                logger.error(f"{self} exception while closing the websocket: {e}")
+            self._close_task = asyncio.create_task(self._websocket.close(), name="fastapi-ws-close")
+            self._close_task.add_done_callback(self._on_close_done)
+            done, _ = await asyncio.wait({self._close_task}, timeout=self._ws_close_timeout)
+            if not done:
+                logger.debug(
+                    f"{self} WebSocket close exceeded {self._ws_close_timeout}s; "
+                    "proceeding with shutdown"
+                )
+
+    def _on_close_done(self, task: asyncio.Task):
+        """Log the outcome of the WebSocket close task.
+
+        Runs whether the close completed within ``ws_close_timeout`` or
+        afterwards, so an error raised by a slow close is still surfaced.
+        """
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"{self} exception while closing the websocket: {e}")
 
     async def trigger_client_disconnected(self):
         """Trigger the client disconnected callback."""
@@ -235,8 +292,24 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         self._receive_task = None
         self._monitor_websocket_task = None
 
-        # Whether we have seen a StartFrame already.
-        self._initialized = False
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the input transport with the frame processor setup.
+
+        Args:
+            setup: The frame processor setup configuration.
+        """
+        await super().setup(setup)
+
+        await self._client.setup(setup)
+
+        if self._params.serializer:
+            await self._params.serializer.setup(setup)
+
+    async def cleanup(self):
+        """Clean up transport resources."""
+        await super().cleanup()
+        await self._teardown()
+        await self._transport.cleanup()
 
     async def start(self, frame: StartFrame):
         """Start the input transport and begin message processing.
@@ -246,22 +319,17 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         """
         await super().start(frame)
 
-        if self._initialized:
-            return
-
-        self._initialized = True
-
-        await self._client.setup(frame)
-        if self._params.serializer:
-            await self._params.serializer.setup(frame)
         if not self._monitor_websocket_task and self._params.session_timeout:
             self._monitor_websocket_task = self.create_task(
                 self._monitor_websocket(self._params.session_timeout)
             )
+
         await self._client.trigger_client_connected()
         await self.push_frame(ClientConnectedFrame())
+
         if not self._receive_task:
             self._receive_task = self.create_task(self._receive_messages())
+
         await self.set_transport_ready(frame)
 
     async def _stop_tasks(self):
@@ -273,6 +341,16 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
             await self.cancel_task(self._receive_task)
             self._receive_task = None
 
+    async def _teardown(self):
+        """Cancel the receive/monitor tasks and disconnect the client.
+
+        Idempotent and shared by ``stop()``, ``cancel()``, and ``cleanup()`` so
+        the independent receive loop is always stopped and the WebSocket always
+        disconnected, regardless of which teardown hook runs.
+        """
+        await self._stop_tasks()
+        await self._client.disconnect()
+
     async def stop(self, frame: EndFrame):
         """Stop the input transport and cleanup resources.
 
@@ -280,8 +358,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
             frame: The end frame signaling transport shutdown.
         """
         await super().stop(frame)
-        await self._stop_tasks()
-        await self._client.disconnect()
+        await self._teardown()
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the input transport and stop all processing.
@@ -290,13 +367,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
             frame: The cancel frame signaling immediate cancellation.
         """
         await super().cancel(frame)
-        await self._stop_tasks()
-        await self._client.disconnect()
-
-    async def cleanup(self):
-        """Clean up transport resources."""
-        await super().cleanup()
-        await self._transport.cleanup()
+        await self._teardown()
 
     async def _receive_messages(self):
         """Main message receiving loop for WebSocket messages."""
@@ -362,7 +433,7 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
         # (e.g. from the TTS), and since this is just a network connection we
         # would be sending it to quickly. Instead, we want to block to emulate
         # an audio device, this is what the send interval is. It will be
-        # computed on StartFrame.
+        # computed during setup.
         self._send_interval = 0
         self._next_send_time = 0
 
@@ -374,8 +445,20 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
         # emitted, preserving any remainder for subsequent sends.
         self._audio_send_buffer = bytearray()
 
-        # Whether we have seen a StartFrame already.
-        self._initialized = False
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the output transport with the frame processor setup.
+
+        Args:
+            setup: The frame processor setup configuration.
+        """
+        await super().setup(setup)
+
+        self._send_interval = (self.audio_chunk_size / self.sample_rate) / 2
+
+        await self._client.setup(setup)
+
+        if self._params.serializer:
+            await self._params.serializer.setup(setup)
 
     async def start(self, frame: StartFrame):
         """Start the output transport and initialize timing.
@@ -385,15 +468,6 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
         """
         await super().start(frame)
 
-        if self._initialized:
-            return
-
-        self._initialized = True
-
-        await self._client.setup(frame)
-        if self._params.serializer:
-            await self._params.serializer.setup(frame)
-        self._send_interval = (self.audio_chunk_size / self.sample_rate) / 2
         await self.set_transport_ready(frame)
 
     async def stop(self, frame: EndFrame):
@@ -419,6 +493,7 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
     async def cleanup(self):
         """Clean up transport resources."""
         await super().cleanup()
+        await self._client.disconnect()
         await self._transport.cleanup()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -467,34 +542,33 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
         )
 
         if self._params.add_wav_header:
-            with io.BytesIO() as buffer:
-                with wave.open(buffer, "wb") as wf:
-                    wf.setsampwidth(2)
-                    wf.setnchannels(frame.num_channels)
-                    wf.setframerate(frame.sample_rate)
-                    wf.writeframes(frame.audio)
-                wav_frame = OutputAudioRawFrame(
-                    buffer.getvalue(),
-                    sample_rate=frame.sample_rate,
-                    num_channels=frame.num_channels,
-                )
-                frame = wav_frame
+            frame = OutputAudioRawFrame(
+                pcm_to_wav(frame.audio, frame.sample_rate, frame.num_channels),
+                sample_rate=frame.sample_rate,
+                num_channels=frame.num_channels,
+            )
 
-        await self._write_frame(frame)
+        if not await self._write_frame(frame):
+            return False
 
         # Simulate audio playback with a sleep.
         await self._write_audio_sleep()
 
         return True
 
-    async def _write_frame(self, frame: Frame):
-        """Serialize and send a frame through the WebSocket."""
+    async def _write_frame(self, frame: Frame) -> bool:
+        """Serialize and send a frame through the WebSocket.
+
+        Returns:
+            Whether the frame was sent.
+        """
         if self._client.is_closing or not self._client.is_connected:
-            return
+            return False
 
         if not self._params.serializer:
-            return
+            return False
 
+        success = False
         try:
             payload = await self._params.serializer.serialize(frame)
             if payload:
@@ -511,11 +585,16 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
                         chunk = bytes(self._audio_send_buffer[:packet_bytes])
                         del self._audio_send_buffer[:packet_bytes]
                         await self._client.send(chunk)
-                    return
+                    return True
 
                 await self._client.send(payload)
+
+                success = True
         except Exception as e:
             logger.error(f"{self} exception sending data: {e.__class__.__name__} ({e})")
+            success = False
+
+        return success
 
     async def _write_audio_sleep(self):
         """Simulate audio playback timing with appropriate delays."""
@@ -557,12 +636,21 @@ class FastAPIWebsocketTransport(BaseTransport):
     ):
         """Initialize the FastAPI WebSocket transport.
 
+        Raises ``ValueError`` if ``params.allowed_origins`` is set and the
+        connection's Origin header is missing or not in the allowed list. The
+        caller is responsible for closing the WebSocket in that case.
+
         Args:
             websocket: The FastAPI WebSocket connection.
             params: Transport configuration parameters.
             input_name: Optional name for the input processor.
             output_name: Optional name for the output processor.
         """
+        if params.allowed_origins:
+            origin = websocket.headers.get("origin", "")
+            if not is_origin_allowed(origin, params.allowed_origins):
+                raise ValueError(f"WebSocket connection rejected: origin '{origin}' not allowed")
+
         super().__init__(input_name=input_name, output_name=output_name)
 
         self._params = params
@@ -573,7 +661,9 @@ class FastAPIWebsocketTransport(BaseTransport):
             on_session_timeout=self._on_session_timeout,
         )
 
-        self._client = FastAPIWebsocketClient(websocket, self._callbacks)
+        self._client = FastAPIWebsocketClient(
+            websocket, self._callbacks, ws_close_timeout=self._params.ws_close_timeout
+        )
 
         self._input = FastAPIWebsocketInputTransport(
             self, self._client, self._params, name=self._input_name

@@ -11,7 +11,6 @@ context when token limits are reached, enabling efficient long-running conversat
 """
 
 import json
-import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -25,6 +24,7 @@ from pipecat.processors.aggregators.llm_context import (
     LLMContextMessage,
     LLMSpecificMessage,
 )
+from pipecat.utils.deprecation import deprecated
 
 # Fallback timeout (seconds) used when summarization_timeout is None.
 DEFAULT_SUMMARIZATION_TIMEOUT = 120.0
@@ -131,8 +131,11 @@ class LLMAutoContextSummarizationConfig:
         max_context_tokens: Maximum allowed context size in tokens. When this
             limit is reached, summarization is triggered to compress the context.
             The tokens are calculated using the industry-standard approximation
-            of 1 token ≈ 4 characters. Set to ``None`` to disable token-based
-            triggering.
+            of 1 token ≈ 4 characters. This measures the context messages only:
+            the LLM service's ``system_instruction`` is sent on every inference
+            but is not part of the context, and summarization cannot compress
+            it. Size this limit against the model's window minus the
+            instruction. Set to ``None`` to disable token-based triggering.
         max_unsummarized_messages: Maximum number of new messages that can
             accumulate since the last summary before triggering a new
             summarization. This ensures regular compression even if token
@@ -167,6 +170,10 @@ class LLMAutoContextSummarizationConfig:
             self.summary_config.target_context_tokens = int(self.max_context_tokens * 0.8)
 
 
+@deprecated(
+    "`LLMContextSummarizationConfig` is deprecated since 0.0.104 and will be removed in 2.0.0. "
+    "Use `LLMAutoContextSummarizationConfig` instead."
+)
 @dataclass
 class LLMContextSummarizationConfig:
     """Configuration for context summarization behavior.
@@ -174,6 +181,7 @@ class LLMContextSummarizationConfig:
     .. deprecated:: 0.0.104
         Use :class:`LLMAutoContextSummarizationConfig` with a nested
         :class:`LLMContextSummaryConfig` instead.
+        Will be removed in 2.0.0.
 
         Example::
 
@@ -207,12 +215,6 @@ class LLMContextSummarizationConfig:
 
     def __post_init__(self):
         """Validate configuration parameters."""
-        warnings.warn(
-            "LLMContextSummarizationConfig is deprecated. "
-            "Use LLMAutoContextSummarizationConfig with a nested LLMContextSummaryConfig instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         if self.max_context_tokens is None and self.max_unsummarized_messages is None:
             raise ValueError(
                 "At least one of max_context_tokens and max_unsummarized_messages must be set"
@@ -335,11 +337,9 @@ class LLMContextSummarizationUtil:
             context: LLM context to estimate.
 
         Returns:
-            Estimated total token count including:
-            - Message content (text, images)
-            - Tool calls and their arguments
-            - Tool results
-            - Structural overhead (TOKEN_OVERHEAD_PER_MESSAGE per message)
+            The estimated total token count, covering message content (text and
+            images), tool calls and their arguments, tool results, and
+            ``TOKEN_OVERHEAD_PER_MESSAGE`` of structural overhead per message.
         """
         total = 0
 
@@ -582,7 +582,7 @@ class LLMContextSummarizationUtil:
         )
 
     @staticmethod
-    def format_messages_for_summary(messages: list[dict]) -> str:
+    def format_messages_for_summary(messages: list[LLMContextMessage]) -> str:
         """Format messages as a transcript for summarization.
 
         Args:

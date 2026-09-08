@@ -33,9 +33,9 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error(
-        "In order to use Google AI, you need to `pip install pipecat-ai[google]`. Also, set `GOOGLE_APPLICATION_CREDENTIALS` environment variable."
+        'In order to use Google AI, you need to `uv add "pipecat-ai[google]"`. Also, set `GOOGLE_APPLICATION_CREDENTIALS` environment variable.'
     )
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -66,7 +66,7 @@ class GoogleVertexLLMService(GoogleLLMService):
         credentials: str | None = None,
         credentials_path: str | None = None,
         model: str | None = None,
-        location: str = "us-east4",
+        location: str = "global",
         project_id: str,
         params: GoogleLLMService.InputParams | None = None,
         settings: Settings | None = None,
@@ -81,17 +81,21 @@ class GoogleVertexLLMService(GoogleLLMService):
         Args:
             credentials: JSON string of service account credentials.
             credentials_path: Path to the service account JSON file.
-            model: Model identifier (e.g., "gemini-2.5-flash").
+            model: Model identifier (e.g., "gemini-3.6-flash").
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GoogleVertexLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
-            location: GCP region for Vertex AI endpoint. Defaults to "us-east4".
+            location: Location for the Vertex AI endpoint. Defaults to "global",
+                the only location that serves the Gemini 3 series; the regional
+                endpoints serve the 2.5 series.
             project_id: Google Cloud project ID.
             params: Input parameters for the model.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GoogleVertexLLMService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings for this service.  When both
                 deprecated parameters and *settings* are provided, *settings*
@@ -100,6 +104,8 @@ class GoogleVertexLLMService(GoogleLLMService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GoogleVertexLLMService.Settings(system_instruction=...)`` instead.
+                    Will be removed in 2.0.0.
+
             tools: List of available tools/functions.
             tool_config: Configuration for tool usage.
             http_options: HTTP options for the client.
@@ -124,7 +130,7 @@ class GoogleVertexLLMService(GoogleLLMService):
 
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             system_instruction=None,
             max_tokens=4096,
             temperature=None,
@@ -136,6 +142,7 @@ class GoogleVertexLLMService(GoogleLLMService):
             filter_incomplete_user_turns=False,
             user_turn_completion_config=None,
             thinking=None,
+            safety_settings=None,
             extra={},
         )
 

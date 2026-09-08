@@ -36,9 +36,40 @@ git push origin your-branch-name
 
 Our maintainers will review your PR, and once everything is good, your contributions will be merged!
 
+## Filing Bug Reports
+
+A good bug report is one a maintainer can act on. The single most useful thing you can include is a **minimal runnable reproduction**: a small single-file bot, or a test using `run_test()` from `pipecat.tests.utils`, that shows the bug.
+
+### What we require
+
+- A minimal reproducible example (runnable code, not just prose). If the bug truly can't be captured in code (for example, it only shows up on rare live calls), say so and include everything you have: logs, timestamps, session IDs, and your pipeline setup.
+- Confirmation that you reproduced the issue yourself on the latest Pipecat release (or `main`).
+
+### What gets your report looked at faster
+
+- A failing [behavioral eval](src/pipecat/evals/) scenario that demonstrates the bug.
+- An audio recording, when the bug is audible (interruptions, latency, garbled audio, wrong turn-taking).
+
+### AI-assisted reports
+
+Using AI tools to help write a report is fine. Submitting AI output you haven't verified is not. If you file a report:
+
+- You must have observed the behavior yourself.
+- You must be able to personally answer follow-up questions about it.
+
+Reports that appear machine-generated and unverified may be closed with a single request for justification. Repeat submissions of unverified reports may lead to being blocked from the repository.
+
+### Triage of incomplete reports
+
+Reports without a runnable reproduction get the `needs-repro` label and one comment asking for it. If no reproduction (or a clear explanation of why one isn't possible) is added within 30 days, the issue is closed automatically. Closed issues can always be reopened once a reproduction is available.
+
+If you respond on a `needs-repro` issue, any comment resets the 30-day clock. When a maintainer reviews your response and confirms it includes a runnable reproduction, they relabel the issue `repro-provided`, which takes it out of the auto-close pool and into the review queue. If what you added still isn't a runnable reproduction, the `needs-repro` label stays and the clock keeps running.
+
 ## Changelog Entries
 
 Every pull request that makes a user-facing change should include a changelog entry. We use a changelog fragment system to avoid merge conflicts.
+
+A fix or follow-up to a change that has not shipped yet needs no entry of its own: the unreleased change's entry covers it — update that entry instead if the follow-up alters what it should say.
 
 ### Creating a Changelog Fragment
 
@@ -205,10 +236,71 @@ We follow Google-style docstrings with these specific conventions:
 
 **Deprecations:**
 
-- Use `warnings.warn()` in code for runtime deprecation warnings
-- Add `.. deprecated::` directive in docstrings for documentation visibility
-- Include version information and describe current status
-- Describe parameters in present tense, use directive to indicate deprecation status
+Always add a `.. deprecated::` directive to the docstring — it is the single
+source of truth that tooling parses into a deprecation registry, so it follows
+a small grammar (enforced by `tests/test_deprecation_markers.py`):
+
+- A version after `::` (e.g. `.. deprecated:: 1.3.0`).
+- A body that names the replacement with a Sphinx role — `:class:`, `:meth:`,
+  `:func:`, `:attr:`, `:mod:` (preferred, since the role encodes the target's
+  kind) — or a backticked name, or states `No replacement.` explicitly. Use a
+  plain backtick (not a role) when a role wouldn't resolve: aliases like
+  ``Service.Settings``, usage idioms like ``settings=...``, or parameters.
+- **The replacement is the first reference in the body**, so lead with the
+  relation clause — `Use :class:`X` instead.`, `Merged into :class:`X`.`,
+  `Moved to :mod:`X`.`. Any references after it are contextual prose, not
+  additional replacements, so you can freely mention related APIs:
+
+  ```
+  .. deprecated:: 1.3.0
+      Use :class:`~pipecat.workers.runner.WorkerRunner` instead. It now runs
+      workers (of which :class:`~pipecat.pipeline.worker.PipelineWorker` is one
+      kind), not just pipelines.
+  ```
+
+  Here the replacement is `WorkerRunner`; `PipelineWorker` is just context.
+- **Never lead with a contextual reference.** The first reference must be the
+  actual replacement — not the deprecated thing itself, a ``DeprecationWarning``,
+  or a related-but-not-replacement API. When nothing replaces it (a removed
+  parameter, a behavior change), lead with `No replacement.` rather than relying
+  on incidental words like "no longer".
+
+For the *runtime* warning, the mechanism depends on what is being deprecated:
+
+- **Classes, functions, methods, and properties** → the PEP 702 `@deprecated`
+  decorator (`from pipecat.utils.deprecation import deprecated`). It emits the
+  `DeprecationWarning` automatically and lets type checkers and IDEs flag usages
+  statically. (For a property, place `@deprecated` below `@property`, on the
+  getter.) Its message must be a string literal following the canonical
+  template:
+  - `` `Subject` is deprecated since X.Y.Z and will be removed in A.B.C. Use `Replacement` instead.``
+  - The removal version `A.B.C` is a concrete semantic version (e.g. `2.0.0`) —
+    commit to the release that removes it, don't write "a future release". With
+    nothing to migrate to, the second sentence is `No replacement.` — stated
+    explicitly.
+- **Parameters, module moves, behavior/value changes** → the decorator can't
+  mark these, so call `warnings.warn(..., DeprecationWarning)` by hand. These
+  don't get static-checker detection; the directive documents them.
+- **Fields whose reads are intercepted by `__getattribute__`** → call
+  `warn_deprecated_read()` (`from pipecat.utils.deprecation import
+  warn_deprecated_read`). Such a field is read wherever its object travels, so a
+  hand-rolled `warnings.warn` repeats itself on every read; the helper warns once
+  per call site, and reports the line that performed the read.
+
+```python
+from pipecat.utils.deprecation import deprecated
+
+
+@deprecated(
+    "`OldService` is deprecated since 1.3.0 and will be removed in 2.0.0. Use `NewService` instead."
+)
+class OldService(NewService):
+    """Deprecated alias for :class:`NewService`.
+
+    .. deprecated:: 1.3.0
+        Use :class:`NewService` instead. Will be removed in 2.0.0.
+    """
+```
 
 #### Examples:
 
@@ -235,14 +327,17 @@ class MyService(BaseService):
             old_param: Controls legacy behavior.
 
                 .. deprecated:: 1.2.0
-                    This parameter no longer has any effect and will be removed in version 2.0.
+                    No replacement; this parameter no longer has any effect. Will
+                    be removed in 2.0.0.
 
             **kwargs: Additional arguments passed to parent.
         """
         if old_param is not None:
             import warnings
+
             warnings.warn(
-                "Parameter 'old_param' is deprecated and will be removed in version 2.0.",
+                "`old_param` is deprecated since 1.2.0 and will be removed in 2.0.0. "
+                "No replacement.",
                 DeprecationWarning,
             )
         super().__init__(**kwargs)
@@ -267,6 +362,7 @@ class MyService(BaseService):
         """
         pass
 
+
 # Dataclass with code examples
 @dataclass
 class MessageFrame:
@@ -286,6 +382,7 @@ class MessageFrame:
     """
 
     messages: List[dict]
+
 
 # Enum class
 class Status(Enum):

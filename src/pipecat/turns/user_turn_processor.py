@@ -12,11 +12,17 @@ from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
     Frame,
+    ProposedUserStartedSpeakingFrame,
+    ProposedUserStoppedSpeakingFrame,
     StartFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frame_processor import (
+    FrameDirection,
+    FrameProcessor,
+    FrameProcessorSetup,
+)
 from pipecat.turns.user_idle_controller import UserIdleController
 from pipecat.turns.user_start import BaseUserTurnStartStrategy, UserTurnStartedParams
 from pipecat.turns.user_stop import BaseUserTurnStopStrategy, UserTurnStoppedParams
@@ -35,7 +41,11 @@ class UserTurnProcessor(FrameProcessor):
     Event handlers available:
 
     - on_user_turn_started: Emitted when a user turn starts.
-    - on_user_turn_stopped: Emitted when a user turn stops.
+    - on_user_turn_inference_triggered: Emitted when enough signal exists to
+      start LLM inference. Fires together with `on_user_turn_stopped` for
+      most strategies; fires alone when a downstream strategy gates
+      finalization on the LLM's verdict.
+    - on_user_turn_stopped: Emitted when a user turn is semantically final.
     - on_user_turn_stop_timeout: Emitted if no stop strategy triggers before timeout.
     - on_user_turn_idle: Emitted when the user has been idle for the configured timeout.
 
@@ -43,6 +53,10 @@ class UserTurnProcessor(FrameProcessor):
 
         @processor.event_handler("on_user_turn_started")
         async def on_user_turn_started(processor, strategy: BaseUserTurnStartStrategy):
+            ...
+
+        @processor.event_handler("on_user_turn_inference_triggered")
+        async def on_user_turn_inference_triggered(processor, strategy: BaseUserTurnStopStrategy):
             ...
 
         @processor.event_handler("on_user_turn_stopped")
@@ -85,6 +99,7 @@ class UserTurnProcessor(FrameProcessor):
         self._register_event_handler("on_user_turn_stopped")
         self._register_event_handler("on_user_turn_stop_timeout")
         self._register_event_handler("on_user_turn_idle")
+        self._register_event_handler("on_user_turn_inference_triggered")
 
         self._user_turn_controller = UserTurnController(
             user_turn_strategies=user_turn_strategies or UserTurnStrategies(),
@@ -101,9 +116,22 @@ class UserTurnProcessor(FrameProcessor):
         self._user_turn_controller.add_event_handler(
             "on_user_turn_stop_timeout", self._on_user_turn_stop_timeout
         )
+        self._user_turn_controller.add_event_handler(
+            "on_user_turn_inference_triggered", self._on_user_turn_inference_triggered
+        )
 
         self._user_idle_controller = UserIdleController(user_idle_timeout=user_idle_timeout)
         self._user_idle_controller.add_event_handler("on_user_turn_idle", self._on_user_turn_idle)
+
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the processor.
+
+        Args:
+            setup: Configuration object containing setup parameters.
+        """
+        await super().setup(setup)
+        await self._user_turn_controller.setup(setup)
+        await self._user_idle_controller.setup(setup)
 
     async def cleanup(self):
         """Clean up processor resources."""
@@ -125,10 +153,8 @@ class UserTurnProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, StartFrame):
-            # Push StartFrame before start(), because we want StartFrame to be
-            # processed by every processor before any other frame is processed.
             await self.push_frame(frame, direction)
-            await self._start(frame)
+            await self._user_turn_controller.start()
         elif isinstance(frame, EndFrame):
             # Push EndFrame before stop(), because stop() waits on the task to
             # finish and the task finishes when EndFrame is processed.
@@ -137,6 +163,15 @@ class UserTurnProcessor(FrameProcessor):
         elif isinstance(frame, CancelFrame):
             await self._cancel(frame)
             await self.push_frame(frame, direction)
+        elif isinstance(frame, ProposedUserStartedSpeakingFrame):
+            # A proposal is resolved once. Forwarding one our own strategies
+            # resolve would let a resolver further down the pipeline decide the
+            # same turn a second time.
+            if not self._user_turn_controller.resolves_proposed_turn_start_frames:
+                await self.push_frame(frame, direction)
+        elif isinstance(frame, ProposedUserStoppedSpeakingFrame):
+            if not self._user_turn_controller.resolves_proposed_turn_stop_frames:
+                await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)
 
@@ -144,15 +179,17 @@ class UserTurnProcessor(FrameProcessor):
 
         await self._user_idle_controller.process_frame(frame)
 
-    async def _start(self, frame: StartFrame):
-        await self._user_turn_controller.setup(self.task_manager)
-        await self._user_idle_controller.setup(self.task_manager)
-
     async def _stop(self, frame: EndFrame):
-        await self._cleanup()
+        await self._stop_controllers()
 
     async def _cancel(self, frame: CancelFrame):
-        await self._cleanup()
+        await self._stop_controllers()
+
+    async def _stop_controllers(self):
+        # Session end stops the controllers' timers; what they hold may be
+        # shared, so releasing it waits for cleanup().
+        await self._user_turn_controller.stop()
+        await self._user_idle_controller.stop()
 
     async def _cleanup(self):
         await self._user_turn_controller.cleanup()
@@ -204,3 +241,11 @@ class UserTurnProcessor(FrameProcessor):
 
     async def _on_user_turn_idle(self, controller):
         await self._call_event_handler("on_user_turn_idle")
+
+    async def _on_user_turn_inference_triggered(
+        self,
+        controller: UserTurnController,
+        strategy: BaseUserTurnStopStrategy,
+    ):
+        logger.debug(f"{self}: User turn inference triggered (strategy: {strategy})")
+        await self._call_event_handler("on_user_turn_inference_triggered", strategy)

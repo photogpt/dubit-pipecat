@@ -15,8 +15,7 @@ from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContext,
     LLMContextAggregatorPair,
@@ -27,6 +26,7 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.heygen.api_liveavatar import LiveAvatarNewSessionRequest
 from pipecat.transports.heygen.transport import HeyGenParams, HeyGenTransport, ServiceType
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
@@ -86,17 +86,22 @@ async def main():
             ]
         )
 
-        task = PipelineTask(
+        worker = PipelineWorker(
             pipeline,
             params=PipelineParams(
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
+            processor_unusable_policy=ProcessorUnusablePolicy.END,
         )
+
+        runner = WorkerRunner()
+
+        await runner.add_workers(worker)
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
-            logger.info(f"Client connected")
+            logger.info("Client connected")
             # Kick off the conversation.
             context.add_message(
                 {
@@ -104,16 +109,14 @@ async def main():
                     "content": "Start by saying 'Hello' and then a short greeting.",
                 }
             )
-            await task.queue_frames([LLMRunFrame()])
+            await worker.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
-            logger.info(f"Client disconnected")
-            await task.cancel()
+            logger.info("Client disconnected")
+            await runner.cancel()
 
-        runner = PipelineRunner()
-
-        await runner.run(task)
+        await runner.run()
 
 
 if __name__ == "__main__":

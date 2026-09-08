@@ -16,8 +16,8 @@ try:
     import sentry_sdk
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use Sentry, you need to `pip install pipecat-ai[sentry]`.")
-    raise Exception(f"Missing module: {e}")
+    logger.error('In order to use Sentry, you need to `uv add "pipecat-ai[sentry]"`.')
+    raise ImportError(f"Missing module: {e}") from e
 
 from pipecat.processors.metrics.frame_processor_metrics import FrameProcessorMetrics
 
@@ -53,9 +53,7 @@ class SentryMetrics(FrameProcessorMetrics):
         await super().setup(task_manager)
         if self._sentry_available:
             self._sentry_queue = asyncio.Queue()
-            self._sentry_task = self.task_manager.create_task(
-                self._sentry_task_handler(), name=f"{self}::_sentry_task_handler"
-            )
+            self._sentry_task = self.create_task(self._sentry_task_handler())
 
     async def cleanup(self):
         """Clean up Sentry resources and flush pending transactions.

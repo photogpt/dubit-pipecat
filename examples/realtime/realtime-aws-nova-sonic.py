@@ -5,7 +5,6 @@
 #
 
 
-import asyncio
 import os
 import random
 from datetime import datetime
@@ -13,19 +12,15 @@ from datetime import datetime
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
     LLMContextAggregatorPair,
-    LLMUserAggregatorParams,
-    UserTurnStoppedMessage,
+    UserTurnMessageAddedMessage,
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -35,57 +30,38 @@ from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.workers.runner import WorkerRunner
 
 # Load environment variables
 load_dotenv(override=True)
 
 
-async def fetch_weather_from_api(params: FunctionCallParams):
-    temperature = (
-        random.randint(60, 85)
-        if params.arguments["format"] == "fahrenheit"
-        else random.randint(15, 30)
-    )
-    # Simulate a long network delay.
-    # You can continue chatting while waiting for this to complete.
-    # With Nova 2 Sonic (the default model), the assistant will respond
-    # appropriately once the function call is complete.
-    await asyncio.sleep(5)
+async def get_current_weather(params: FunctionCallParams, location: str, format: str):
+    """Get the current weather.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+        format: The temperature unit to use. Must be either "celsius" or "fahrenheit". Infer this from the user's location.
+    """
+    temperature = random.randint(60, 85) if format == "fahrenheit" else random.randint(15, 30)
     await params.result_callback(
         {
             "conditions": "nice",
             "temperature": temperature,
-            "location": params.arguments["location"],
-            "format": params.arguments["format"],
+            "location": location,
+            "format": format,
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
     )
 
 
-weather_function = FunctionSchema(
-    name="get_current_weather",
-    description="Get the current weather",
-    properties={
-        "location": {
-            "type": "string",
-            "description": "The city and state, e.g. San Francisco, CA",
-        },
-        "format": {
-            "type": "string",
-            "enum": ["celsius", "fahrenheit"],
-            "description": "The temperature unit to use. Infer this from the users location.",
-        },
-    },
-    required=["location", "format"],
-)
-
-# Create tools schema
-tools = ToolsSchema(standard_tools=[weather_function])
-
-
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -102,7 +78,7 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     # Specify initial system instruction.
     system_instruction = (
@@ -119,13 +95,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     llm = AWSNovaSonicLLMService(
         secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
         access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        # as of 2025-12-09, these are the supported regions:
+        # as of 2026-08-31, these are the supported regions:
         # - Nova 2 Sonic (the default model):
         #   - us-east-1
         #   - us-west-2
+        #   - eu-north-1
         #   - ap-northeast-1
         # - Nova Sonic (the older model):
         #   - us-east-1
+        #   - eu-north-1
         #   - ap-northeast-1
         region=os.environ["AWS_REGION"],
         session_token=os.getenv("AWS_SESSION_TOKEN"),
@@ -144,21 +122,34 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             transition_threshold_seconds=360,
         ),
         # you could choose to pass tools here rather than via context
-        # tools=tools
+        # tools=[get_current_weather]
     )
 
-    # Register function for function calls
-    # you can either register a single function for all function calls, or specific functions
-    # llm.register_function(None, fetch_weather_from_api)
-    llm.register_function(
-        "get_current_weather", fetch_weather_from_api, cancel_on_interruption=False
-    )
+    # AWS Nova Sonic drives the conversation server-side.
+    #
+    # It does not, however, emit turn frames (UserStartedSpeakingFrame,
+    # UserStoppedSpeakingFrame). Context aggregation works without those
+    # frames, but you can add supplemental local turn frames for consumption
+    # by other pipeline processors that expect them (like RTVI), or to trigger
+    # on_user_turn_* events. WARNING: you should consider supplemental local
+    # turn frames approximate, as they may not always align with server turns.
+    #
+    # To enable supplemental local turn frames, uncomment the SileroVADAnalyzer
+    # and related imports below and the `user_params=` argument further down.
+    # Doing so enables the on_user_turn_stopped event, which you could then
+    # also uncomment.
+    #
+    # from pipecat.audio.vad.silero import SileroVADAnalyzer
+    # from pipecat.processors.aggregators.llm_response_universal import (
+    #     LLMUserAggregatorParams,
+    #     UserTurnStoppedMessage,
+    # )
+    # from pipecat.turns.user_stop import BaseUserTurnStopStrategy
 
-    # Set up context and context management.
-    context = LLMContext(tools=tools)
+    context = LLMContext(tools=[get_current_weather])
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        # user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
     # Build the pipeline
@@ -172,25 +163,30 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ]
     )
 
-    # Configure the pipeline task
-    task = PipelineTask(
+    # Configure the pipeline worker
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     # Handle client connection event
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Kick off the conversation.
         context.add_message(
             {"role": "developer", "content": "Please introduce yourself to the user."}
         )
-        await task.queue_frames([LLMRunFrame()])
+        await worker.queue_frames([LLMRunFrame()])
         # HACK: if using the older Nova Sonic (pre-2) model, you need this special way of
         # triggering the first assistant response. Note that this trigger requires a special
         # corresponding bit of text in the system instruction.
@@ -199,11 +195,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # Handle client disconnection events
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await task.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    @user_aggregator.event_handler("on_user_turn_stopped")
-    async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
+    # See comment above the user_aggregator for details on why this is
+    # commented out and instructions for enabling it.
+    # @user_aggregator.event_handler("on_user_turn_stopped")
+    # async def on_user_turn_stopped(
+    #     aggregator,
+    #     strategy: BaseUserTurnStopStrategy,
+    #     message: UserTurnStoppedMessage,
+    # ):
+    #     logger.info(f"User turn stopped at {message.timestamp}")
+
+    @user_aggregator.event_handler("on_user_turn_message_added")
+    async def on_user_turn_message_added(aggregator, message: UserTurnMessageAddedMessage):
         timestamp = f"[{message.timestamp}] " if message.timestamp else ""
         line = f"{timestamp}user: {message.content}"
         logger.info(f"Transcript: {line}")
@@ -214,9 +220,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         line = f"{timestamp}assistant: {message.content}"
         logger.info(f"Transcript: {line}")
 
-    # Run the pipeline
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

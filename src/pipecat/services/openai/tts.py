@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Literal
 
+import httpx
 from loguru import logger
 from openai import AsyncOpenAI, BadRequestError
 from pydantic import BaseModel
@@ -24,9 +25,12 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
+from pipecat.services.openai._constants import OPENAI_SAMPLE_RATE
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 ValidVoice = Literal[
     "alloy",
@@ -70,8 +74,8 @@ class OpenAITTSSettings(TTSSettings):
         speed: Voice speed control (0.25 to 4.0, default 1.0).
     """
 
-    instructions: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    speed: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    instructions: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    speed: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class OpenAITTSService(TTSService):
@@ -85,13 +89,16 @@ class OpenAITTSService(TTSService):
     Settings = OpenAITTSSettings
     _settings: Settings
 
-    OPENAI_SAMPLE_RATE = 24000  # OpenAI TTS always outputs at 24kHz
-
+    @deprecated(
+        "`OpenAITTSService.InputParams` is deprecated since 0.0.105 and will be removed in 2.0.0. "
+        "Use `OpenAITTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for OpenAI TTS configuration.
 
         .. deprecated:: 0.0.105
             Use ``settings=OpenAITTSService.Settings(...)`` instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             instructions: Instructions to guide voice synthesis behavior.
@@ -106,6 +113,7 @@ class OpenAITTSService(TTSService):
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        http_client: httpx.AsyncClient | None = None,
         voice: str | None = None,
         model: str | None = None,
         sample_rate: int | None = None,
@@ -120,39 +128,49 @@ class OpenAITTSService(TTSService):
         Args:
             api_key: OpenAI API key for authentication. If None, uses environment variable.
             base_url: Custom base URL for OpenAI API. If None, uses default.
+            http_client: Custom ``httpx.AsyncClient`` for API requests, e.g. one with a
+                longer request timeout. Prefer ``openai.DefaultAsyncHttpxClient``, which
+                keeps the SDK's connection limits and redirect handling; a bare
+                ``httpx.AsyncClient`` uses httpx's defaults instead. Defaults to None,
+                which lets the SDK build its own client.
             voice: Voice ID to use for synthesis. Defaults to "alloy".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAITTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             model: TTS model to use. Defaults to "gpt-4o-mini-tts".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAITTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Output audio sample rate in Hz. If None, uses OpenAI's default 24kHz.
             instructions: Optional instructions to guide voice synthesis behavior.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAITTSService.Settings(instructions=...)`` instead.
+                    Will be removed in 2.0.0.
 
             speed: Voice speed control (0.25 to 4.0, default 1.0).
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAITTSService.Settings(speed=...)`` instead.
+                    Will be removed in 2.0.0.
 
             params: Optional synthesis controls (acting instructions, speed, ...).
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAITTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
             **kwargs: Additional keyword arguments passed to TTSService.
         """
-        if sample_rate and sample_rate != self.OPENAI_SAMPLE_RATE:
+        if sample_rate and sample_rate != OPENAI_SAMPLE_RATE:
             logger.warning(
-                f"OpenAI TTS only supports {self.OPENAI_SAMPLE_RATE}Hz sample rate. "
+                f"OpenAI TTS only supports {OPENAI_SAMPLE_RATE}Hz sample rate. "
                 f"Current rate of {sample_rate}Hz may cause issues."
             )
 
@@ -200,7 +218,7 @@ class OpenAITTSService(TTSService):
             **kwargs,
         )
 
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -217,9 +235,9 @@ class OpenAITTSService(TTSService):
             frame: The start frame containing initialization parameters.
         """
         await super().start(frame)
-        if self.sample_rate != self.OPENAI_SAMPLE_RATE:
+        if self.sample_rate != OPENAI_SAMPLE_RATE:
             logger.warning(
-                f"OpenAI TTS requires {self.OPENAI_SAMPLE_RATE}Hz sample rate. "
+                f"OpenAI TTS requires {OPENAI_SAMPLE_RATE}Hz sample rate. "
                 f"Current rate of {self.sample_rate}Hz may cause issues."
             )
 
@@ -234,7 +252,6 @@ class OpenAITTSService(TTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech data.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
         voice = assert_given(self._settings.voice)
         if voice is None:
             yield ErrorFrame(error="OpenAI TTS voice must be specified")

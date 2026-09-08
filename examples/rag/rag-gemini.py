@@ -55,13 +55,11 @@ from dotenv import load_dotenv
 from google import genai  # pyright: ignore[reportAttributeAccessIssue]
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -76,6 +74,7 @@ from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
@@ -118,9 +117,13 @@ Here is the knowledge base you have access to:
 """
 
 
-async def query_knowledge_base(params: FunctionCallParams):
-    """Query the knowledge base for the answer to the question."""
-    logger.info(f"Querying knowledge base for question: {params.arguments['question']}")
+async def query_knowledge_base(params: FunctionCallParams, question: str):
+    """Query the knowledge base for the answer to the question.
+
+    Args:
+        question: The question to query the knowledge base with.
+    """
+    logger.info(f"Querying knowledge base for question: {question}")
 
     # for our case, the first two messages are the instructions and the user message
     # so we remove them.
@@ -161,6 +164,10 @@ async def query_knowledge_base(params: FunctionCallParams):
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -177,7 +184,7 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
@@ -203,22 +210,8 @@ Your response will be turned into speech so use only simple words and punctuatio
             system_instruction=system_prompt,
         ),
     )
-    llm.register_function("query_knowledge_base", query_knowledge_base)
 
-    query_function = FunctionSchema(
-        name="query_knowledge_base",
-        description="Query the knowledge base for the answer to the question.",
-        properties={
-            "question": {
-                "type": "string",
-                "description": "The question to query the knowledge base with.",
-            },
-        },
-        required=["question"],
-    )
-    tools = ToolsSchema(standard_tools=[query_function])
-
-    context = LLMContext(tools=tools)
+    context = LLMContext(tools=[query_knowledge_base])
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -235,31 +228,35 @@ Your response will be turned into speech so use only simple words and punctuatio
             assistant_aggregator,
         ]
     )
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Start conversation - empty prompt to let LLM follow system instructions
         context.add_message(
             {"role": "developer", "content": "Please introduce yourself to the user."}
         )
-        await task.queue_frames([LLMRunFrame()])
+        await worker.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await task.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

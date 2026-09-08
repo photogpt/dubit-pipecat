@@ -12,6 +12,7 @@ supporting multiple languages, voices, and SSML features.
 
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
+from xml.sax.saxutils import escape
 
 from loguru import logger
 from pydantic import BaseModel
@@ -23,18 +24,20 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
 )
 from pipecat.services.aws.utils import resolve_credentials
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import NOT_GIVEN, NotGiven
 
 try:
-    import aioboto3
+    import aiobotocore.session
     from botocore.exceptions import BotoCoreError, ClientError
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use AWS services, you need to `pip install pipecat-ai[aws]`.")
-    raise Exception(f"Missing module: {e}")
+    logger.error('In order to use AWS services, you need to `uv add "pipecat-ai[aws]"`.')
+    raise ImportError(f"Missing module: {e}") from e
 
 
 def language_to_aws_language(language: Language) -> str:
@@ -69,8 +72,10 @@ def language_to_aws_language(language: Language) -> str:
         Language.EN: "en-US",  # Default to US English
         Language.EN_AU: "en-AU",
         Language.EN_GB: "en-GB",
+        Language.EN_IE: "en-IE",
         Language.EN_IN: "en-IN",
         Language.EN_NZ: "en-NZ",
+        Language.EN_SG: "en-SG",
         Language.EN_US: "en-US",
         Language.EN_ZA: "en-ZA",
         # Finnish
@@ -135,11 +140,11 @@ class AWSPollyTTSSettings(TTSSettings):
         lexicon_names: List of pronunciation lexicons to apply.
     """
 
-    engine: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    pitch: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    rate: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    volume: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    lexicon_names: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    engine: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    pitch: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    rate: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    volume: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    lexicon_names: list[str] | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class AWSPollyTTSService(TTSService):
@@ -153,11 +158,16 @@ class AWSPollyTTSService(TTSService):
     Settings = AWSPollyTTSSettings
     _settings: Settings
 
+    @deprecated(
+        "`AWSPollyTTSService.InputParams` is deprecated since 0.0.105 and will be removed in "
+        "2.0.0. Use `AWSPollyTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for AWS Polly TTS configuration.
 
         .. deprecated:: 0.0.105
             Use ``AWSPollyTTSService.Settings`` directly via the ``settings`` parameter instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             engine: TTS engine to use ('standard', 'neural', etc.).
@@ -192,7 +202,7 @@ class AWSPollyTTSService(TTSService):
 
         Args:
             api_key: AWS secret access key. If None, falls back to environment
-                variables and the default boto3 credential chain (instance
+                variables and the default botocore credential chain (instance
                 profiles, IRSA, ECS task roles, SSO, etc.).
             aws_access_key_id: AWS access key ID. Same fallback behaviour as
                 ``api_key``.
@@ -202,12 +212,14 @@ class AWSPollyTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSPollyTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Audio sample rate. If None, uses service default.
             params: Additional input parameters for voice customization.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSPollyTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -253,7 +265,7 @@ class AWSPollyTTSService(TTSService):
             **kwargs,
         )
 
-        # Resolve credentials using the shared chain (explicit → env → boto3).
+        # Resolve credentials using the shared chain (explicit → env → botocore).
         self._aws_params = resolve_credentials(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=api_key,
@@ -261,7 +273,7 @@ class AWSPollyTTSService(TTSService):
             region=region,
         ).to_boto_kwargs()
 
-        self._aws_session = aioboto3.Session()
+        self._aws_session = aiobotocore.session.get_session()
 
         self._resampler = create_stream_resampler()
 
@@ -304,7 +316,9 @@ class AWSPollyTTSService(TTSService):
         if prosody_attrs:
             ssml += f"<prosody {' '.join(prosody_attrs)}>"
 
-        ssml += text
+        # Escape XML-reserved characters so arbitrary text can't break the
+        # SSML document (Polly rejects it with InvalidSsmlException).
+        ssml += escape(text)
 
         if prosody_attrs:
             ssml += "</prosody>"
@@ -328,8 +342,6 @@ class AWSPollyTTSService(TTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         try:
             # Construct the parameters dictionary
             ssml = self._construct_ssml(text)
@@ -348,13 +360,11 @@ class AWSPollyTTSService(TTSService):
             # Filter out None values
             filtered_params = {k: v for k, v in params.items() if v is not None}
 
-            # aioboto3's `client()` is an async context manager but its stubs
-            # don't advertise `__aenter__` / `__aexit__` to pyright.
-            async with self._aws_session.client(  # pyright: ignore[reportGeneralTypeIssues]
+            async with self._aws_session.create_client(  # pyright: ignore[reportGeneralTypeIssues]
                 "polly",
                 **self._aws_params,  # pyright: ignore[reportArgumentType]
             ) as polly:
-                response = await polly.synthesize_speech(**filtered_params)
+                response = await polly.synthesize_speech(**filtered_params)  # pyright: ignore[reportGeneralTypeIssues]
                 if "AudioStream" in response:
                     # Get the streaming body and read it
                     stream = response["AudioStream"]

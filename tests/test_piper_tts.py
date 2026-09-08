@@ -16,6 +16,7 @@ from aiohttp import web
 from pipecat.frames.frames import (
     AggregatedTextFrame,
     ErrorFrame,
+    LLMAssistantPushAggregationFrame,
     TTSAudioRawFrame,
     TTSSpeakFrame,
     TTSStartedFrame,
@@ -98,11 +99,16 @@ async def test_run_piper_tts_success(aiohttp_client):
             "Expected: TTSStartedFrame < TTSTextFrame < TTSStoppedFrame"
         )
 
-        # Frames between Started and Stopped must all be audio or text
+        # Frames between Started and Stopped must all be audio or text. A
+        # LLMAssistantPushAggregationFrame is also expected here: TTSSpeakFrame
+        # defaults to append_to_context=True, so the service emits one at the end
+        # of the utterance to commit the spoken text to the LLM context.
         for i in range(started_idx + 1, stopped_idx):
-            assert frame_types[i] in (TTSAudioRawFrame, TTSTextFrame), (
-                f"Unexpected frame type between Started and Stopped: {frame_types[i]}"
-            )
+            assert frame_types[i] in (
+                TTSAudioRawFrame,
+                TTSTextFrame,
+                LLMAssistantPushAggregationFrame,
+            ), f"Unexpected frame type between Started and Stopped: {frame_types[i]}"
 
         # All audio frames have correct sample rate
         audio_frames = [f for f in down_frames if isinstance(f, TTSAudioRawFrame)]
@@ -138,7 +144,8 @@ async def test_run_piper_tts_error(aiohttp_client):
 
         expected_down_frames = [AggregatedTextFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame]
 
-        expected_up_frames = [ErrorFrame]
+        # The 404, then the context completing with no audio.
+        expected_up_frames = [ErrorFrame, ErrorFrame]
 
         frames_received = await run_test(
             tts_service,

@@ -21,8 +21,7 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -33,6 +32,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
@@ -65,7 +65,7 @@ async def main():
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
         ),
     )
 
@@ -87,20 +87,25 @@ async def main():
         ]
     )
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner()
+
+    await runner.add_workers(worker)
 
     # Register an event handler so we can play the audio when the
     # participant joins.
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(transport, participant_id):
         await asyncio.sleep(1)
-        await task.queue_frame(
+        await worker.queue_frame(
             TTSSpeakFrame(
                 "Hello there! How are you doing today? Would you like to talk about the weather?"
             )
@@ -116,7 +121,7 @@ async def main():
         # convert data from bytes to string
         json_data = json.loads(data)
 
-        await task.queue_frames(
+        await worker.queue_frames(
             [
                 InterruptionFrame(),
                 UserStartedSpeakingFrame(),
@@ -129,9 +134,7 @@ async def main():
             ],
         )
 
-    runner = PipelineRunner()
-
-    await runner.run(task)
+    await runner.run()
 
 
 if __name__ == "__main__":

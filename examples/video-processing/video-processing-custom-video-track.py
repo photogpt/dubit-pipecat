@@ -22,6 +22,7 @@ import time
 import numpy as np
 from loguru import logger
 
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
@@ -30,19 +31,23 @@ from pipecat.frames.frames import (
     StartFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.daily.transport import DailyCustomVideoTrackParams, DailyParams
+from pipecat.workers.runner import WorkerRunner
 
 WIDTH = 320
 HEIGHT = 240
 FPS = 30
 
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         video_out_enabled=True,
         video_out_width=WIDTH,
@@ -177,10 +182,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     generator = VideoPatternGenerator(WIDTH, HEIGHT, FPS)
     blue_tint = BlueTintProcessor(destination="blue")
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         Pipeline([generator, blue_tint, transport.output()]),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
@@ -189,10 +199,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
-        await task.queue_frame(EndFrame())
+        await worker.queue_frame(EndFrame())
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

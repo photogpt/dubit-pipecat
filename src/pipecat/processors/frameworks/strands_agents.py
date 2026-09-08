@@ -20,8 +20,8 @@ try:
     from strands import Agent
     from strands.multiagent.graph import Graph
 except ModuleNotFoundError as e:
-    logger.error("In order to use Strands Agents, you need to `pip install strands-agents`.")
-    raise Exception(f"Missing module: {e}")
+    logger.error("In order to use Strands Agents, you need to `uv add strands-agents`.")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 class StrandsAgentsProcessor(FrameProcessor):

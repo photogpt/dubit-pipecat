@@ -10,13 +10,12 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.adapters.schemas.direct_function import tool_options
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -31,23 +30,71 @@ from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
 
-async def fetch_weather_from_api(params: FunctionCallParams):
+@tool_options(cancel_on_interruption=False, timeout_secs=30)
+async def get_current_weather(params: FunctionCallParams, location: str):
+    """Get the current weather.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+    """
     # Simulate a long-running API call, so we can test async function calls (cancel_on_interruption=False).
-    await asyncio.sleep(20)
+    await asyncio.sleep(15)
+    logger.debug("Returning get_current_weather result.")
     await params.result_callback({"conditions": "nice", "temperature": "75"})
 
 
-async def fetch_restaurant_recommendation(params: FunctionCallParams):
+# A lookup that hangs: it sleeps far past the deadline it was registered with,
+# so the call is always cancelled before it can report anything. The result it
+# would eventually have returned is distinctive on purpose — if the bot ever
+# quotes a share price, a cancelled handler's result reached the conversation.
+@tool_options(cancel_on_interruption=False, timeout_secs=5)
+async def get_stock_price(params: FunctionCallParams, symbol: str):
+    """Get the current share price for a stock.
+
+    Args:
+        symbol: The ticker symbol, e.g. "NVDA".
+    """
+    await asyncio.sleep(20)
+    logger.debug("Returning get_stock_price result.")
+    await params.result_callback({"price": "184.20", "currency": "USD"})
+
+
+@tool_options(cancel_on_interruption=False, cancellable_by_llm=True, timeout_secs=120)
+async def write_report(params: FunctionCallParams, topic: str):
+    """Write a long research report on a topic.
+
+    Args:
+        topic: What the report should cover.
+    """
+    # Long enough to still be running when the LLM asks to stop it: listing what
+    # is running and then calling the cancel tool, with a spoken reply often in
+    # between, outlasts shorter work.
+    await asyncio.sleep(25)
+    logger.debug("Returning write_report result.")
+    await params.result_callback({"report": f"A 5000-word report on {topic}."})
+
+
+async def get_restaurant_recommendation(params: FunctionCallParams, location: str):
+    """Get a restaurant recommendation.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+    """
     await params.result_callback({"name": "The Golden Dragon"})
 
 
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -64,65 +111,39 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
         ),
     )
 
     llm = AnthropicLLMService(
         api_key=os.environ["ANTHROPIC_API_KEY"],
-        enable_async_tool_cancellation=True,
         settings=AnthropicLLMService.Settings(
             system_instruction="You are a helpful assistant in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Respond to what the user said in a creative, helpful, and brief way.",
         ),
     )
-
-    # You can also register a function_name of None to get all functions
-    # sent to the same callback with an additional function_name parameter.
-    llm.register_function(
-        "get_current_weather",
-        fetch_weather_from_api,
-        cancel_on_interruption=False,
-        timeout_secs=30,
-    )
-    llm.register_function("get_restaurant_recommendation", fetch_restaurant_recommendation)
 
     @llm.event_handler("on_function_calls_cancelled")
     async def on_function_calls_cancelled(service, function_calls):
         for item in function_calls:
             logger.info(f"Function call cancelled: {item.function_name} [{item.tool_call_id}]")
 
-    weather_function = FunctionSchema(
-        name="get_current_weather",
-        description="Get the current weather",
-        properties={
-            "location": {
-                "type": "string",
-                "description": "The city and state, e.g. San Francisco, CA",
-            },
-        },
-        required=["location"],
+    # cancel_on_interruption=False (set via @tool_options) makes this an async
+    # function call.
+    context = LLMContext(
+        tools=[
+            get_current_weather,
+            write_report,
+            get_stock_price,
+            get_restaurant_recommendation,
+        ]
     )
-    restaurant_function = FunctionSchema(
-        name="get_restaurant_recommendation",
-        description="Get a restaurant recommendation",
-        properties={
-            "location": {
-                "type": "string",
-                "description": "The city and state, e.g. San Francisco, CA",
-            },
-        },
-        required=["location"],
-    )
-    tools = ToolsSchema(standard_tools=[weather_function, restaurant_function])
-
-    context = LLMContext(tools=tools)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -140,32 +161,35 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ]
     )
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Kick off the conversation.
         context.add_message(
             {"role": "developer", "content": "Please introduce yourself to the user."}
         )
-        await task.queue_frames([LLMRunFrame()])
+        await worker.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await task.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):
