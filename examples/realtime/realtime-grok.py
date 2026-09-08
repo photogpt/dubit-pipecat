@@ -12,13 +12,13 @@ voice conversations. The Grok Voice Agent provides:
 
 - Real-time audio streaming with low latency
 - Built-in voice activity detection (VAD)
-- Multiple voice options (Ara, Rex, Sal, Eve, Leo)
+- Built-in and custom voice IDs
 - Built-in tools: web_search, x_search, file_search
 - Custom function calling
 
 Requirements:
     - XAI_API_KEY environment variable set
-    - pip install pipecat-ai[grok]
+    - uv add "pipecat-ai[grok]"
 
 Usage:
     python 50-grok-realtime.py --transport webrtc
@@ -31,22 +31,18 @@ from datetime import datetime
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
-
-# Note: Grok has built-in server-side VAD, so we don't need local VAD
-# from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.observers.loggers.transcription_log_observer import (
     TranscriptionLogObserver,
 )
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
     LLMContextAggregatorPair,
+    UserTurnMessageAddedMessage,
     UserTurnStoppedMessage,
 )
 from pipecat.runner.types import RunnerArguments
@@ -57,6 +53,8 @@ from pipecat.services.xai.realtime.llm import GrokRealtimeLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.turns.user_stop import BaseUserTurnStopStrategy
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
@@ -64,21 +62,26 @@ load_dotenv(override=True)
 # --- Function Handlers ---
 
 
-async def fetch_weather_from_api(params: FunctionCallParams):
-    """Handle weather function calls."""
-    temperature = 75 if params.arguments.get("format") == "fahrenheit" else 24
+async def get_current_weather(params: FunctionCallParams, location: str, format: str):
+    """Get the current weather.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+        format: The temperature unit to use. Must be either "celsius" or "fahrenheit". Infer this from the user's location.
+    """
+    temperature = 75 if format == "fahrenheit" else 24
     await params.result_callback(
         {
             "conditions": "nice",
             "temperature": temperature,
-            "format": params.arguments.get("format", "celsius"),
+            "format": format,
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
     )
 
 
 async def get_current_time(params: FunctionCallParams):
-    """Handle time function calls."""
+    """Get the current time."""
     await params.result_callback(
         {
             "time": datetime.now().strftime("%H:%M:%S"),
@@ -88,9 +91,12 @@ async def get_current_time(params: FunctionCallParams):
     )
 
 
-async def get_restaurant_recommendation(params: FunctionCallParams):
-    """Handle restaurant recommendation function calls."""
-    location = params.arguments.get("location", "unknown")
+async def get_restaurant_recommendation(params: FunctionCallParams, location: str):
+    """Get a restaurant recommendation.
+
+    Args:
+        location: The city and state, e.g. "San Francisco, CA".
+    """
     await params.result_callback(
         {
             "name": "The Golden Dragon",
@@ -101,46 +107,7 @@ async def get_restaurant_recommendation(params: FunctionCallParams):
     )
 
 
-# --- Function Schemas ---
-
-weather_function = FunctionSchema(
-    name="get_current_weather",
-    description="Get the current weather for a location",
-    properties={
-        "location": {
-            "type": "string",
-            "description": "The city and state, e.g. San Francisco, CA",
-        },
-        "format": {
-            "type": "string",
-            "enum": ["celsius", "fahrenheit"],
-            "description": "The temperature unit to use.",
-        },
-    },
-    required=["location", "format"],
-)
-
-time_function = FunctionSchema(
-    name="get_current_time",
-    description="Get the current time and date",
-    properties={},
-    required=[],
-)
-
-restaurant_function = FunctionSchema(
-    name="get_restaurant_recommendation",
-    description="Get a restaurant recommendation for a location",
-    properties={
-        "location": {
-            "type": "string",
-            "description": "The city and state, e.g. San Francisco, CA",
-        },
-    },
-    required=["location"],
-)
-
 # Create tools schema with custom functions
-tools = ToolsSchema(standard_tools=[weather_function, time_function, restaurant_function])
 
 
 # --- Transport Configuration ---
@@ -148,6 +115,10 @@ tools = ToolsSchema(standard_tools=[weather_function, time_function, restaurant_
 # Note: We don't need local VAD since Grok has built-in server-side VAD.
 # Audio sample rates are configured via PipelineParams, not transport params.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -168,8 +139,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # Configure Grok session properties
     session_properties = SessionProperties(
-        # Voice options: Ara, Rex, Sal, Eve, Leo
-        voice="Ara",
+        voice="rex",
         # Grok-specific built-in tools can be added here:
         # tools=[
         #     WebSearchTool(),  # Enable web search
@@ -202,17 +172,39 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     # Register function handlers
-    llm.register_function("get_current_weather", fetch_weather_from_api)
-    llm.register_function("get_current_time", get_current_time)
-    llm.register_function("get_restaurant_recommendation", get_restaurant_recommendation)
 
     # Create context with initial message and tools
     context = LLMContext(
         [{"role": "developer", "content": "Say hello and introduce yourself!"}],
-        tools,
+        [get_current_weather, get_current_time, get_restaurant_recommendation],
     )
 
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
+    # It appears that Grok Realtime can sometimes be slow to detect the start
+    # of a user's turn; uncomment the below imports and user_params to
+    # enable "supplemental" interruptions.
+    # from pipecat.turns.user_start.vad_user_turn_start_strategy import VADUserTurnStartStrategy
+    # from pipecat.audio.vad.silero import SileroVADAnalyzer
+    # from pipecat.turns.user_turn_strategies import UserTurnStrategies
+    # from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregatorParams
+    # from pipecat.turns.user_start.external_user_turn_start_strategy import (
+    #     ExternalUserTurnStartStrategy,
+    # )
+    # from pipecat.turns.user_stop.external_user_turn_stop_strategy import (
+    #     ExternalUserTurnStopStrategy,
+    # )
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        # user_params=LLMUserAggregatorParams(
+        #     vad_analyzer=SileroVADAnalyzer(),
+        #     user_turn_strategies=UserTurnStrategies(
+        #         start=[
+        #             VADUserTurnStartStrategy(enable_interruptions=True),
+        #             ExternalUserTurnStartStrategy(),
+        #         ],
+        #         stop=[ExternalUserTurnStopStrategy()],
+        #     ),
+        # ),
+    )
 
     # Build the pipeline
     # Note: In realtime mode, transcription comes from Grok (upstream),
@@ -227,7 +219,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ]
     )
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
@@ -235,22 +227,42 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
         observers=[TranscriptionLogObserver()],
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Client connected")
         # Kick off the conversation
-        await task.queue_frames([LLMRunFrame()])
+        await worker.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
-        await task.cancel()
+        await runner.cancel()
 
-    # Log transcript updates
+    # Subscribe to user turn lifecycle events. Grok emits its own
+    # user-turn frames from server VAD, so on_user_turn_stopped fires at
+    # the turn boundary. In realtime mode UserTurnStoppedMessage.content
+    # is None because the user transcript isn't finalized at turn-stop
+    # time — subscribe to on_user_turn_message_added for the finalized text
+    # (it's written when the assistant response begins). The assistant
+    # message is finalized at turn-stop time in both modes, so
+    # on_assistant_turn_stopped carries the content directly.
     @user_aggregator.event_handler("on_user_turn_stopped")
-    async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
+    async def on_user_turn_stopped(
+        aggregator,
+        strategy: BaseUserTurnStopStrategy,
+        message: UserTurnStoppedMessage,
+    ):
+        logger.info(f"User turn stopped at {message.timestamp}")
+
+    @user_aggregator.event_handler("on_user_turn_message_added")
+    async def on_user_turn_message_added(aggregator, message: UserTurnMessageAddedMessage):
         timestamp = f"[{message.timestamp}] " if message.timestamp else ""
         line = f"{timestamp}user: {message.content}"
         logger.info(f"Transcript: {line}")
@@ -261,9 +273,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         line = f"{timestamp}assistant: {message.content}"
         logger.info(f"Transcript: {line}")
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

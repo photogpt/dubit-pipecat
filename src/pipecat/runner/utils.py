@@ -33,18 +33,34 @@ import json
 import os
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import WebSocket
 from loguru import logger
 
 from pipecat.runner.types import (
+    CallData,
     DailyRunnerArguments,
+    EvalRunnerArguments,
+    ExotelCallData,
     LiveKitRunnerArguments,
+    MOQRunnerArguments,
     SmallWebRTCRunnerArguments,
+    TelnyxCallData,
+    VonageRunnerArguments,
     WebSocketRunnerArguments,
 )
-from pipecat.transports.base_transport import BaseTransport
+from pipecat.transports.base_transport import BaseTransport, TransportParams
+
+if TYPE_CHECKING:
+    # Imported for type-checking only so the typed guard functions (e.g.
+    # _is_daily) can narrow to the concrete transport types
+    from typing import TypeGuard
+
+    from fastapi import WebSocket
+
+    from pipecat.transports.daily.transport import DailyTransport
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+    from pipecat.transports.vonage.video_connector import VonageVideoConnectorTransport
 
 
 def _detect_transport_type_from_message(message_data: dict) -> str:
@@ -94,16 +110,19 @@ def _detect_transport_type_from_message(message_data: dict) -> str:
     return "unknown"
 
 
-async def parse_telephony_websocket(websocket: WebSocket):
+async def parse_telephony_websocket(websocket: "WebSocket"):
     """Parse telephony WebSocket messages and return transport type and call data.
 
     Args:
         websocket: FastAPI WebSocket connection from telephony provider.
 
     Returns:
-        tuple: (transport_type: str, call_data: dict)
+        tuple: (transport_type: str, call_data: CallData)
 
-        call_data contains provider-specific fields:
+        ``call_data`` is a :class:`~pipecat.runner.types.CallData` model with typed
+        attribute access (``call_data.to_number``) that is also dict-compatible
+        (``call_data["call_id"]``, ``call_data.get("body", {})``). Fields populated
+        per provider:
 
         - Twilio::
 
@@ -117,7 +136,7 @@ async def parse_telephony_websocket(websocket: WebSocket):
 
             {
                 "stream_id": str,
-                "call_control_id": str,
+                "call_id": str,  # normalized from Telnyx's call_control_id
                 "outbound_encoding": str,
                 "from": str,
                 "to": str,
@@ -146,9 +165,23 @@ async def parse_telephony_websocket(websocket: WebSocket):
     Example usage::
 
         transport_type, call_data = await parse_telephony_websocket(websocket)
-        if transport_type == "twilio":
-            user_id = call_data["body"]["user_id"]
+        caller = call_data.from_number  # typed attribute access
+        user_id = call_data.body.get("user_id")  # custom params still a dict
+        # dict-style access also works: call_data["call_id"]
+
+    The parsed result is cached on the websocket, so this is idempotent: the
+    underlying ``websocket.iter_text()`` stream is single-use, but calling this
+    function again (e.g. once inside ``create_transport`` and once in bot code)
+    returns the same ``(transport_type, call_data)`` without re-consuming it.
     """
+    # Return the cached parse if this websocket has already been parsed — the
+    # message stream below can only be consumed once. The cache is always a
+    # (transport_type, call_data) tuple; isinstance keeps this robust against
+    # mock/auto-attr websockets in tests.
+    cached = getattr(websocket, "_pipecat_parsed_telephony", None)
+    if isinstance(cached, tuple):
+        return cached
+
     # Read first two messages
     message_stream = websocket.iter_text()
     first_message = {}
@@ -202,12 +235,18 @@ async def parse_telephony_websocket(websocket: WebSocket):
                 "call_id": start_data.get("callSid"),
                 # All custom parameters
                 "body": body_data,
+                # Promote common custom params so the typed API is uniform across
+                # providers (Twilio carries from/to as TwiML stream parameters).
+                "from": body_data.get("from_number"),
+                "to": body_data.get("to_number"),
             }
 
         elif transport_type == "telnyx":
             call_data = {
                 "stream_id": call_data_raw.get("stream_id"),
-                "call_control_id": call_data_raw.get("start", {}).get("call_control_id"),
+                # Telnyx's call identifier is its call_control_id; normalize it onto
+                # the common `call_id` field.
+                "call_id": call_data_raw.get("start", {}).get("call_control_id"),
                 "outbound_encoding": call_data_raw.get("start", {})
                 .get("media_format", {})
                 .get("encoding"),
@@ -237,11 +276,61 @@ async def parse_telephony_websocket(websocket: WebSocket):
             call_data = {}
 
         logger.debug(f"Parsed - Type: {transport_type}, Data: {call_data}")
-        return transport_type, call_data
+        # Return a typed, dict-compatible CallData model (attribute access for new
+        # code; subscript/.get for existing dict-style code). model_validate maps the
+        # wire keys (e.g. "from"/"to") onto the aliased fields. Providers with extra
+        # fields get a specific subclass so those fields are typed, not just extras.
+        call_data_type = {"telnyx": TelnyxCallData, "exotel": ExotelCallData}.get(
+            transport_type, CallData
+        )
+        result = (transport_type, call_data_type.model_validate(call_data))
+        # Cache on the websocket so subsequent calls don't re-consume the stream.
+        # Only successful parses are cached; the raising paths stay retryable.
+        # setattr (not attribute assignment) since WebSocket has no such declared
+        # field; mirrors the getattr-based read above.
+        # setattr: the attribute is ours to stash, not part of WebSocket's type.
+        setattr(websocket, "_pipecat_parsed_telephony", result)  # noqa: B010
+        return result
 
     except Exception as e:
         logger.error(f"Error parsing telephony WebSocket: {e}")
         raise
+
+
+def _transport_is(transport: BaseTransport, class_name: str) -> bool:
+    """Return whether ``transport`` is an instance of ``class_name``.
+
+    Do this without importing, to avoid triggering import-time errors for
+    transports that aren't installed and aren't needed.
+
+    Assumes transport class names are unique, so that matching by name alone
+    (e.g. "DailyTransport") is sufficient to identify it.
+
+    Args:
+        transport: The transport instance to check.
+        class_name: Unqualified name of the transport class to match.
+
+    Returns:
+        ``True`` if ``transport`` is an instance of ``class_name``, else ``False``.
+    """
+    candidates = {type(transport), transport.__class__}
+    return any(base.__name__ == class_name for klass in candidates for base in klass.__mro__)
+
+
+# Typed guards over _transport_is.
+# They narrow the transport to its concrete type so call sites can use
+# transport-specific methods/properties in a type-checker- and
+# auto-complete-friendly way.
+def _is_daily(transport: BaseTransport) -> "TypeGuard[DailyTransport]":
+    return _transport_is(transport, "DailyTransport")
+
+
+def _is_smallwebrtc(transport: BaseTransport) -> "TypeGuard[SmallWebRTCTransport]":
+    return _transport_is(transport, "SmallWebRTCTransport")
+
+
+def _is_vonage(transport: BaseTransport) -> "TypeGuard[VonageVideoConnectorTransport]":
+    return _transport_is(transport, "VonageVideoConnectorTransport")
 
 
 def get_transport_client_id(transport: BaseTransport, client: Any) -> str:
@@ -254,22 +343,12 @@ def get_transport_client_id(transport: BaseTransport, client: Any) -> str:
     Returns:
         Client identifier string, empty if transport not supported.
     """
-    # Import conditionally to avoid dependency issues
-    try:
-        from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-
-        if isinstance(transport, SmallWebRTCTransport):
-            return client.pc_id
-    except ImportError:
-        pass
-
-    try:
-        from pipecat.transports.daily.transport import DailyTransport
-
-        if isinstance(transport, DailyTransport):
-            return client["id"]
-    except ImportError:
-        pass
+    if _is_smallwebrtc(transport):
+        return client.pc_id
+    if _is_daily(transport):
+        return client["id"]
+    if _is_vonage(transport):
+        return client["streamId"]
 
     logger.warning(f"Unable to get client id from unsupported transport {type(transport)}")
     return ""
@@ -285,23 +364,25 @@ async def maybe_capture_participant_camera(
         client: Transport-specific client object.
         framerate: Video capture framerate. Defaults to 0 (auto).
     """
-    try:
-        from pipecat.transports.daily.transport import DailyTransport
+    if _is_daily(transport):
+        await transport.capture_participant_video(
+            client["id"], framerate=framerate, video_source="camera"
+        )
+    elif _is_smallwebrtc(transport):
+        await transport.capture_participant_video(video_source="camera")
+    elif _is_vonage(transport):
+        # Imported in-branch (not at module scope) to avoid a hard Vonage dependency;
+        # we only get here when the transport is Vonage, so the extra is installed.
+        from pipecat.transports.vonage.video_connector import SubscribeSettings
 
-        if isinstance(transport, DailyTransport):
-            await transport.capture_participant_video(
-                client["id"], framerate=framerate, video_source="camera"
-            )
-    except ImportError:
-        pass
-
-    try:
-        from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-
-        if isinstance(transport, SmallWebRTCTransport):
-            await transport.capture_participant_video(video_source="camera")
-    except ImportError:
-        pass
+        await transport.subscribe_to_stream(
+            client["streamId"],
+            SubscribeSettings(
+                subscribe_to_audio=True,
+                subscribe_to_video=True,
+                preferred_framerate=framerate if framerate != 0 else None,
+            ),
+        )
 
 
 async def maybe_capture_participant_screen(
@@ -314,24 +395,12 @@ async def maybe_capture_participant_screen(
         client: Transport-specific client object.
         framerate: Video capture framerate. Defaults to 0 (auto).
     """
-    try:
-        from pipecat.transports.daily.transport import DailyTransport
-
-        if isinstance(transport, DailyTransport):
-            await transport.capture_participant_video(
-                client["id"], framerate=framerate, video_source="screenVideo"
-            )
-
-    except ImportError:
-        pass
-
-    try:
-        from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-
-        if isinstance(transport, SmallWebRTCTransport):
-            await transport.capture_participant_video(video_source="screenVideo")
-    except ImportError:
-        pass
+    if _is_daily(transport):
+        await transport.capture_participant_video(
+            client["id"], framerate=framerate, video_source="screenVideo"
+        )
+    elif _is_smallwebrtc(transport):
+        await transport.capture_participant_video(video_source="screenVideo")
 
 
 def _smallwebrtc_sdp_cleanup_ice_candidates(text: str, pattern: str) -> str:
@@ -415,10 +484,10 @@ def _get_transport_params(transport_key: str, transport_params: dict[str, Callab
 
 
 async def _create_telephony_transport(
-    websocket: WebSocket,
+    websocket: "WebSocket",
     params: Any,
     transport_type: str,
-    call_data: dict,
+    call_data: CallData,
 ) -> BaseTransport:
     """Create a telephony transport with pre-parsed WebSocket data.
 
@@ -426,7 +495,7 @@ async def _create_telephony_transport(
         websocket: FastAPI WebSocket connection from telephony provider
         params: FastAPIWebsocketParams (required)
         transport_type: Pre-detected provider type ("twilio", "telnyx", "plivo")
-        call_data: Pre-parsed call data dict with provider-specific fields
+        call_data: Pre-parsed :class:`CallData` with provider-specific fields
 
     Returns:
         Configured FastAPIWebsocketTransport ready for telephony use.
@@ -438,6 +507,9 @@ async def _create_telephony_transport(
 
     logger.info(f"Using pre-detected telephony provider: {transport_type}")
 
+    # Build serializers from the raw wire values via subscript access (the detected
+    # provider guarantees these identifier fields are present). Bots use the typed
+    # attribute API instead — call_data.from_number, call_data.call_id, etc.
     if transport_type == "twilio":
         from pipecat.serializers.twilio import TwilioFrameSerializer
 
@@ -452,7 +524,7 @@ async def _create_telephony_transport(
 
         params.serializer = TelnyxFrameSerializer(
             stream_id=call_data["stream_id"],
-            call_control_id=call_data["call_control_id"],
+            call_control_id=call_data["call_id"],
             outbound_encoding=call_data["outbound_encoding"],
             inbound_encoding="PCMU",  # Standard default
             api_key=os.getenv("TELNYX_API_KEY", ""),
@@ -482,6 +554,47 @@ async def _create_telephony_transport(
     return FastAPIWebsocketTransport(websocket=websocket, params=params)
 
 
+def _maybe_apply_daily_dialin(params: Any, body: Any) -> None:
+    """Wire Daily PSTN dial-in settings from ``runner_args.body`` into ``DailyParams``.
+
+    The dev runner places a ``DailyDialinRequest`` in ``runner_args.body`` for
+    inbound PSTN calls. When present, merge its dial-in settings (and the Daily
+    API key/url it carries, which are load-bearing for the pinless handshake) into
+    the ``DailyParams`` the bot's factory produced. No-op when ``body`` doesn't
+    carry dial-in, so non-dial-in Daily bots are unaffected.
+
+    Args:
+        params: The ``DailyParams`` instance from the bot's transport factory.
+        body: ``runner_args.body`` — a ``DailyDialinRequest``, its ``model_dump()``
+            dict, or unrelated content.
+    """
+    if not body:
+        return
+
+    from pipecat.runner.types import DailyDialinRequest
+
+    try:
+        if isinstance(body, DailyDialinRequest):
+            request = body
+        elif isinstance(body, dict) and "dialin_settings" in body:
+            request = DailyDialinRequest.model_validate(body)
+        else:
+            return
+    except Exception as e:
+        logger.debug(f"runner_args.body present but not a Daily dial-in request, skipping: {e}")
+        return
+
+    from pipecat.transports.daily.transport import DailyDialinSettings
+
+    params.dialin_settings = DailyDialinSettings(
+        call_id=request.dialin_settings.call_id,
+        call_domain=request.dialin_settings.call_domain,
+    )
+    # The dial-in request is authoritative for these (matches the inbound flow).
+    params.api_key = request.daily_api_key
+    params.api_url = request.daily_api_url
+
+
 async def create_transport(
     runner_args: Any, transport_params: dict[str, Callable]
 ) -> BaseTransport:
@@ -509,36 +622,34 @@ async def create_transport(
             "daily": lambda: DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
             ),
             "webrtc": lambda: TransportParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
             ),
             "twilio": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
             ),
             "telnyx": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
             ),
             "plivo": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
             ),
             "exotel": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
+            ),
+            "vonage": lambda: VonageVideoConnectorTransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True
             ),
         }
 
@@ -547,6 +658,9 @@ async def create_transport(
     # Create transport based on runner args type
     if isinstance(runner_args, DailyRunnerArguments):
         params = _get_transport_params("daily", transport_params)
+
+        # Transparently wire PSTN dial-in (no-op when body has none).
+        _maybe_apply_daily_dialin(params, runner_args.body)
 
         from pipecat.transports.daily.transport import DailyTransport
 
@@ -568,8 +682,20 @@ async def create_transport(
         )
 
     elif isinstance(runner_args, WebSocketRunnerArguments):
+        if runner_args.transport_type == "websocket":
+            params = _get_transport_params("websocket", transport_params)
+            from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
+
+            return FastAPIWebsocketTransport(websocket=runner_args.websocket, params=params)
+
         # Parse once to determine the provider and get data
         transport_type, call_data = await parse_telephony_websocket(runner_args.websocket)
+
+        # Expose the parsed handshake to the bot so it can personalize the call
+        # (caller lookup, routing, etc.) without re-parsing the single-use stream.
+        runner_args.transport_type = transport_type
+        runner_args.call_data = call_data
+
         params = _get_transport_params(transport_type, transport_params)
 
         # Create telephony transport with pre-parsed data
@@ -587,6 +713,96 @@ async def create_transport(
             runner_args.room_name,
             params=params,
         )
+    elif isinstance(runner_args, EvalRunnerArguments):
+        # The eval transport is a plain WebSocket server speaking RTVI. The
+        # harness connects as an RTVI client; the bot pipeline must include an
+        # RTVIProcessor and pass an RTVIObserver to the task. Default the
+        # serializer to RTVIEvalSerializer so examples only need to opt into
+        # audio input.
+        from pipecat.evals.serializer import RTVIEvalSerializer
+        from pipecat.evals.transport import EvalTransport, EvalTransportParams
+
+        params = _get_transport_params("eval", transport_params)
+        if not isinstance(params, EvalTransportParams):
+            raise ValueError(
+                "Eval transport params must be an EvalTransportParams instance. "
+                "Set transport_params['eval'] to a lambda returning "
+                "EvalTransportParams(audio_in_enabled=True)."
+            )
+        if params.serializer is None:
+            params.serializer = RTVIEvalSerializer()
+
+        # EvalTransport handles the eval-only behavior: the virtual mic, skip-TTS
+        # before an on-connect greeting, and audio capture/recording.
+        return EvalTransport(
+            params=params,
+            host=runner_args.host,
+            port=runner_args.port,
+        )
+    elif isinstance(runner_args, VonageRunnerArguments):
+        from pipecat.transports.vonage.video_connector import (
+            VonageVideoConnectorTransport,
+            VonageVideoConnectorTransportParams,
+        )
+
+        try:
+            params = cast(
+                VonageVideoConnectorTransportParams,
+                _get_transport_params("vonage", transport_params),
+            )
+        except ValueError:
+            webrtc_params: TransportParams = cast(
+                TransportParams, _get_transport_params("webrtc", transport_params)
+            )
+            params = VonageVideoConnectorTransportParams(
+                **webrtc_params.model_dump(),
+                video_in_auto_subscribe=True,
+            )
+
+        return VonageVideoConnectorTransport(
+            runner_args.application_id,
+            runner_args.vonage_session_id,
+            runner_args.token,
+            params=params,
+        )
+    elif isinstance(runner_args, MOQRunnerArguments):
+        params = _get_transport_params("moq", transport_params)
+
+        from pipecat.transports.moq.transport import MOQParams, MOQTransport
+
+        # Convert TransportParams to MOQParams if needed, applying runner args
+        if not isinstance(params, MOQParams):
+            params = MOQParams(**params.model_dump())
+        params.verify_ssl = runner_args.verify_ssl
+        params.namespace = runner_args.namespace
+        params.participant_id = runner_args.participant_id
+        params.peer_id = runner_args.peer_id
+        params.serve = runner_args.serve
+        params.bind = runner_args.bind
+        params.serve_tls_host = runner_args.serve_tls_host
+        params.serve_tls_cert = runner_args.serve_tls_cert
+        params.serve_tls_key = runner_args.serve_tls_key
+
+        transport = MOQTransport(
+            params=params,
+            host=runner_args.host,
+            port=runner_args.port,
+            path=runner_args.path,
+        )
+
+        # Auto-wire the runner back-channel: when the transport finishes
+        # MOQ bring-up, copy out the cert fingerprints (serve mode) and
+        # signal the runner's ready_event so /start can return. This used
+        # to require boilerplate in every bot example.
+        if runner_args.ready_event is not None:
+
+            @transport.event_handler("on_connected")
+            async def _moq_runner_on_connected(t):
+                runner_args.cert_fingerprints = list(t.cert_fingerprints)
+                if runner_args.ready_event is not None:
+                    runner_args.ready_event.set()
+
+        return transport
 
     else:
         raise ValueError(f"Unsupported runner arguments type: {type(runner_args)}")

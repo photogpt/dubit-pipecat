@@ -14,6 +14,7 @@ Refer to the NVIDIA NIM LLM API documentation for available models and usage:
 https://docs.api.nvidia.com/nim/reference/llm-apis
 """
 
+import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -26,7 +27,6 @@ from pipecat.frames.frames import (
     LLMThoughtStartFrame,
     LLMThoughtTextFrame,
 )
-from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -54,8 +54,6 @@ class NvidiaLLMService(OpenAILLMService):
     This service extends OpenAILLMService to work with NVIDIA's NIM API while
     maintaining compatibility with the OpenAI-style interface. It handles:
 
-    - Incremental token usage reporting (NIM sends per-chunk counts instead
-      of a final summary)
     - Detection and filtering of leading ``<think>``/``</think>`` content for
       models that emit reasoning inline before visible output (e.g.
       DeepSeek-R1, some nemotron models)
@@ -86,17 +84,18 @@ class NvidiaLLMService(OpenAILLMService):
             base_url: The base URL for NIM API. Defaults to NVIDIA's cloud endpoint.
                 For local deployments, pass the local address (e.g. ``http://localhost:8000/v1``).
             model: The model identifier to use. Defaults to
-                "nvidia/nemotron-3-nano-30b-a3b".
+                "nvidia/nemotron-3-super-120b-a12b".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=NvidiaLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
             **kwargs: Additional keyword arguments passed to OpenAILLMService.
         """
         # 1. Initialize default_settings with hardcoded defaults
-        default_settings = self.Settings(model="nvidia/nemotron-3-nano-30b-a3b")
+        default_settings = self.Settings(model="nvidia/nemotron-3-super-120b-a12b")
 
         # 2. Apply direct init arg overrides (deprecated)
         if model is not None:
@@ -118,25 +117,12 @@ class NvidiaLLMService(OpenAILLMService):
                 "Set base_url to your local NIM endpoint for local deployments."
             )
 
-        # Counters for accumulating token usage metrics
-        self._prompt_tokens = 0
-        self._completion_tokens = 0
-        self._total_tokens = 0
-        self._has_reported_prompt_tokens = False
-        self._is_processing = False
-
     def _reset_response_state(self):
         """Reset per-response state at the start of each LLM call.
 
-        Resets token accumulation counters, leading-think-tag detection state,
-        and reasoning-content field tracking.
+        Resets leading-think-tag detection state and reasoning-content field
+        tracking.
         """
-        self._prompt_tokens = 0
-        self._completion_tokens = 0
-        self._total_tokens = 0
-        self._has_reported_prompt_tokens = False
-        self._is_processing = True
-
         self._think_tag_state = _ThinkTagState.DETECTING
         self._think_tag_buffer = ""
 
@@ -185,6 +171,7 @@ class NvidiaLLMService(OpenAILLMService):
                 return passthrough
 
             if self._think_tag_buffer.startswith(_THINK_OPEN):
+                await self.stop_ttfb_metrics()
                 self._think_tag_state = _ThinkTagState.IN_THOUGHT
                 await self.push_frame(LLMThoughtStartFrame())
                 self._think_tag_buffer = self._think_tag_buffer[len(_THINK_OPEN) :]
@@ -214,18 +201,25 @@ class NvidiaLLMService(OpenAILLMService):
                     self._think_tag_buffer = self._think_tag_buffer[safe_end:]
         return None
 
-    async def _flush_reasoning_state(self):
-        """Flush buffered reasoning state at normal stream completion.
+    async def _finalize_reasoning_state(self, *, flush_buffered_text: bool):
+        """Finalize buffered reasoning state at stream end.
 
-        Emits any buffered trailing thought text, closes open thought frames,
-        and forwards any buffered pre-content text that was held while deciding
-        whether the stream began with ``<think>``.
+        Args:
+            flush_buffered_text: Whether to forward buffered text that was held
+                while deciding whether the stream started with ``<think>``.
+                This should be ``True`` on normal completion and ``False``
+                when the stream ends early due to interruption or
+                cancellation.
         """
         if self._think_tag_state == _ThinkTagState.IN_THOUGHT:
-            if self._think_tag_buffer:
+            if self._think_tag_buffer and flush_buffered_text:
                 await self.push_frame(LLMThoughtTextFrame(text=self._think_tag_buffer))
             await self.push_frame(LLMThoughtEndFrame())
-        elif self._think_tag_state == _ThinkTagState.DETECTING and self._think_tag_buffer:
+        elif (
+            self._think_tag_state == _ThinkTagState.DETECTING
+            and self._think_tag_buffer
+            and flush_buffered_text
+        ):
             await super()._push_llm_text(self._think_tag_buffer)
 
         self._think_tag_buffer = ""
@@ -270,9 +264,12 @@ class NvidiaLLMService(OpenAILLMService):
         model name, tool calls, and audio transcripts.
 
         Notes:
-            Stream cleanup is owned by the base OpenAI processing loop
-            (``BaseOpenAILLMService._process_context``), which wraps the stream
-            in its own closing context manager.
+            ``BaseOpenAILLMService._process_context()`` closes the wrapper
+            iterator returned from ``get_chat_completions()``, but it does not
+            close the inner OpenAI stream directly. This wrapper closes that
+            inner stream in a ``finally`` block so it is released promptly,
+            including if the response is cancelled very early, for example due
+            to an interruption right after the request starts.
 
         Args:
             stream: The original chat completion stream.
@@ -281,80 +278,67 @@ class NvidiaLLMService(OpenAILLMService):
             Chat completion chunks with any leading ``<think>`` content removed
             from ``delta.content`` before they reach the base OpenAI loop.
         """
-        async for chunk in stream:
-            if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta:
-                delta = chunk.choices[0].delta
-                rc = getattr(delta, "reasoning_content", None)
-                if rc:
-                    if not self._has_reasoning_field:
-                        self._has_reasoning_field = True
-                        await self.push_frame(LLMThoughtStartFrame())
-                    await self.push_frame(LLMThoughtTextFrame(text=rc))
-                elif self._has_reasoning_field and delta.content:
-                    await self.push_frame(LLMThoughtEndFrame())
-                    self._has_reasoning_field = False
+        completed = False
+        try:
+            async for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta:
+                    delta = chunk.choices[0].delta
+                    rc = getattr(delta, "reasoning_content", None) or getattr(
+                        delta, "reasoning", None
+                    )
+                    if rc:
+                        if not self._has_reasoning_field:
+                            await self.stop_ttfb_metrics()
+                            self._has_reasoning_field = True
+                            await self.push_frame(LLMThoughtStartFrame())
+                        await self.push_frame(LLMThoughtTextFrame(text=rc))
+                    elif self._has_reasoning_field and delta.content:
+                        await self.push_frame(LLMThoughtEndFrame())
+                        self._has_reasoning_field = False
 
-                if delta.content:
-                    delta.content = await self._filter_thinking_content(delta.content)
-            yield chunk
+                    if delta.content:
+                        delta.content = await self._filter_thinking_content(delta.content)
+                yield chunk
+            completed = True
+        finally:
+            try:
+                await self._finalize_reasoning_state(
+                    flush_buffered_text=completed,
+                )
+            finally:
+                await self._close_inner_stream(stream)
 
-        await self._flush_reasoning_state()
+    async def _close_inner_stream(self, stream: AsyncIterator[ChatCompletionChunk]) -> None:
+        """Eagerly close the underlying OpenAI streaming response.
+
+        The OpenAI Python SDK exposes ``close()`` on this stream object.
+        Closing here complements the base OpenAI cleanup path and keeps
+        teardown local to this adapter, including early interruption or
+        cancellation cases.
+        """
+        close = getattr(stream, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception(
+                "NvidiaLLMService: error while closing underlying chat completion stream"
+            )
 
     async def _process_context(self, context: LLMContext):
-        """Process a context through the LLM and accumulate token usage metrics.
+        """Process a context through the LLM.
 
-        Delegates to the base OpenAI streaming loop while adding
-        NVIDIA-specific behavior:
-
-        - ``reasoning_content`` and leading ``<think>`` content are
-          intercepted via the ``get_chat_completions`` stream wrapper and
-          emitted as
-          ``LLMThought*Frame`` objects.
-        - Incremental token counts are accumulated and reported as final
-          totals.
+        Delegates to the base OpenAI streaming loop, resetting the per-response
+        state it needs to emit ``LLMThought*Frame`` objects for
+        ``reasoning_content`` and leading ``<think>`` content, which the
+        ``get_chat_completions`` stream wrapper intercepts.
 
         Args:
             context: The context to process, containing messages and other
                 information needed for the LLM interaction.
         """
         self._reset_response_state()
-
-        # Wrap in try/finally to guarantee accumulated token metrics are
-        # reported and _is_processing is cleared even on cancellation.
-        try:
-            await super()._process_context(context)
-        finally:
-            self._is_processing = False
-            # Report final accumulated token usage at the end of processing
-            if self._prompt_tokens > 0 or self._completion_tokens > 0:
-                self._total_tokens = self._prompt_tokens + self._completion_tokens
-                tokens = LLMTokenUsage(
-                    prompt_tokens=self._prompt_tokens,
-                    completion_tokens=self._completion_tokens,
-                    total_tokens=self._total_tokens,
-                )
-                await super().start_llm_usage_metrics(tokens)
-
-    async def start_llm_usage_metrics(self, tokens: LLMTokenUsage):
-        """Accumulate token usage metrics during processing.
-
-        This method intercepts the incremental token updates from NVIDIA's API
-        and accumulates them instead of passing each update to the metrics system.
-        The final accumulated totals are reported at the end of processing.
-
-        Args:
-            tokens: The token usage metrics for the current chunk of processing,
-                containing prompt_tokens and completion_tokens counts.
-        """
-        # Only accumulate metrics during active processing
-        if not self._is_processing:
-            return
-
-        # Record prompt tokens the first time we see them
-        if not self._has_reported_prompt_tokens and tokens.prompt_tokens > 0:
-            self._prompt_tokens = tokens.prompt_tokens
-            self._has_reported_prompt_tokens = True
-
-        # Update completion tokens count if it has increased
-        if tokens.completion_tokens > self._completion_tokens:
-            self._completion_tokens = tokens.completion_tokens
+        await super()._process_context(context)

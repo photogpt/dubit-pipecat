@@ -10,7 +10,7 @@ Usage:
     python test_krisp_viva_turn_audiofile.py input.wav --frame-duration 20
 
 Requirements:
-    pip install soundfile numpy pipecat-ai[krisp]
+    uv add soundfile numpy "pipecat-ai[krisp]"
     Set KRISP_VIVA_TURN_MODEL_PATH environment variable to point to your .kef model file
 """
 
@@ -27,7 +27,7 @@ try:
     from audio_file_utils import read_audio_file
 except ImportError as e:
     print(f"Error: Missing required dependencies: {e}")
-    print("Install with: pip install soundfile numpy")
+    print("Install with: uv add soundfile numpy")
     sys.exit(1)
 
 # Add src directory to Python path for development environment
@@ -43,7 +43,7 @@ try:
     from pipecat.audio.turn.krisp_viva_turn import KrispTurnParams, KrispVivaTurn
 except ImportError as e:
     print(f"Error: Could not import Krisp VIVA turn analyzer: {e}")
-    print("Make sure pipecat-ai is installed: pip install pipecat-ai[krisp]")
+    print('Make sure pipecat-ai is installed: uv add "pipecat-ai[krisp]"')
     sys.exit(1)
 
 
@@ -95,7 +95,7 @@ async def analyze_audio_file(
         print(f"Warning: Sample rate {sample_rate} not in supported rates {supported_rates}")
         print("Resampling may be required. Continuing anyway...")
 
-    print(f"\nInitializing VIVA turn analyzer:")
+    print("\nInitializing VIVA turn analyzer:")
     print(f"  - Model path: {model_path}")
     print(f"  - Threshold: {threshold}")
     print(f"  - Frame duration: {frame_duration_ms}ms")
@@ -205,7 +205,7 @@ async def analyze_audio_file(
                     f"\n  Warning: {len(audio_buffer)} samples remaining (incomplete frame, will be discarded)"
                 )
 
-        print(f"  Progress: 100.0%")
+        print("  Progress: 100.0%")
 
         # Final speech segment if still speaking
         if current_speech_start is not None:
@@ -225,7 +225,7 @@ async def analyze_audio_file(
         for i, event in enumerate(turn_events, 1):
             print(f"  Turn {i} completed at {event['timestamp']:.2f}s")
 
-        print(f"\nFinal State:")
+        print("\nFinal State:")
         print(f"  Speech triggered: {turn_analyzer.speech_triggered}")
         print(f"  Sample rate: {turn_analyzer.sample_rate}Hz")
         print(f"  Total probabilities collected: {len(all_probabilities)}")

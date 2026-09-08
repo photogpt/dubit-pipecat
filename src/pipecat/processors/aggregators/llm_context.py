@@ -18,61 +18,51 @@ import asyncio
 import base64
 import copy
 import io
-import wave
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeAlias, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast, overload
 
 from loguru import logger
-from openai._types import NOT_GIVEN as OPEN_AI_NOT_GIVEN
-from openai._types import NotGiven as OpenAINotGiven
-from openai.types.chat import (
-    ChatCompletionMessageParam,
-    ChatCompletionToolChoiceOptionParam,
-)
 from PIL import Image
 
+from pipecat.adapters.schemas.direct_function import DirectFunction
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.utils import pcm_to_wav
 from pipecat.frames.frames import AudioRawFrame
 
+# The sentinel is part of LLMContext's public surface — tools and tool_choice
+# default to it — so it is re-exported here for callers. The redundant aliases
+# mark that intent; a plain import would look unused and be stripped.
+from pipecat.utils.types import NOT_GIVEN as NOT_GIVEN
+from pipecat.utils.types import NotGiven as NotGiven
+from pipecat.utils.types import is_given as is_given
+
 # "Re-export" types from OpenAI that we're using as universal context types.
-# NOTE: these are aliased to OpenAI's today, but callers should treat them as
-# LLMContext's own types — independent definitions that happen to coincide
-# with OpenAI's as an implementation detail. If universal context types need
-# to someday diverge from OpenAI's, we should consider managing our own
+# NOTE: these are aliased to OpenAI's for type checking, but callers should
+# treat them as LLMContext's own types — independent definitions that happen to
+# coincide with OpenAI's as an implementation detail. If universal context types
+# need to someday diverge from OpenAI's, we should consider managing our own
 # definitions (but with care, since OpenAI's types are somewhat of a standard
 # and we want to continue supporting them). In the meantime, code at the
 # LLMContext/OpenAI boundary should use explicit casts rather than rely on
 # the aliasing.
-LLMStandardMessage = ChatCompletionMessageParam
-LLMContextToolChoice = ChatCompletionToolChoiceOptionParam
-NOT_GIVEN = OPEN_AI_NOT_GIVEN
-NotGiven = OpenAINotGiven
+#
+# The aliases resolve under type checking only. Every LLM service reaches this
+# module, so importing the OpenAI SDK here would put its load on the startup
+# path of pipelines that never talk to OpenAI. At runtime both are structurally
+# dicts or strings, which is all the annotations need them to be.
+if TYPE_CHECKING:
+    from openai.types.chat import (
+        ChatCompletionMessageParam,
+        ChatCompletionToolChoiceOptionParam,
+    )
 
-
-_T = TypeVar("_T")
-
-
-def is_given(value: _T | NotGiven) -> TypeGuard[_T]:
-    """Check whether a value was explicitly provided.
-
-    Typically used when checking whether a ``NotGiven``-valued field or
-    parameter was set::
-
-        if is_given(context.tools):
-            ...
-
-    Also acts as a type guard: inside a true branch, the value is narrowed
-    to exclude ``NotGiven`` (e.g. ``ToolsSchema | NotGiven`` becomes
-    ``ToolsSchema``).
-
-    Args:
-        value: The value to check.
-
-    Returns:
-        ``True`` if *value* is anything other than ``NOT_GIVEN``.
-    """
-    return not isinstance(value, NotGiven)
+    LLMStandardMessage: TypeAlias = ChatCompletionMessageParam
+    LLMContextToolChoice: TypeAlias = ChatCompletionToolChoiceOptionParam
+else:
+    LLMStandardMessage: TypeAlias = Any
+    LLMContextToolChoice: TypeAlias = Any
 
 
 @dataclass
@@ -101,14 +91,20 @@ class LLMContext:
     def __init__(
         self,
         messages: list[LLMContextMessage] | None = None,
-        tools: ToolsSchema | NotGiven = NOT_GIVEN,
+        tools: ToolsSchema | list[FunctionSchema | DirectFunction] | NotGiven = NOT_GIVEN,
         tool_choice: LLMContextToolChoice | NotGiven = NOT_GIVEN,
     ):
         """Initialize the LLM context.
 
         Args:
             messages: Initial list of conversation messages.
-            tools: Available tools for the LLM to use.
+            tools: Available tools for the LLM to use. May be a ``ToolsSchema``
+                or a plain list of direct functions and/or ``FunctionSchema``
+                objects (normalized to a ``ToolsSchema`` internally). Any tool
+                that carries a handler — a direct function, or a
+                ``FunctionSchema`` with its ``handler`` set — is registered with
+                the LLM service automatically, so no separate
+                ``register_function`` call is needed.
             tool_choice: Tool selection strategy for the LLM.
         """
         self._messages: list[LLMContextMessage] = messages if messages else []
@@ -195,15 +191,8 @@ class LLMContext:
 
             data = b"".join(frame.audio for frame in audio_frames)
 
-            with io.BytesIO() as buffer:
-                with wave.open(buffer, "wb") as wf:
-                    wf.setsampwidth(2)
-                    wf.setnchannels(num_channels)
-                    wf.setframerate(sample_rate)
-                    wf.writeframes(data)
-
-                encoded_audio = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            return encoded_audio
+            wav = pcm_to_wav(data, sample_rate, num_channels)
+            return base64.b64encode(wav).decode("utf-8")
 
         encoded_audio = await asyncio.to_thread(encode_audio)
 
@@ -404,11 +393,15 @@ class LLMContext:
         """
         self.set_messages(transform(self._messages))
 
-    def set_tools(self, tools: ToolsSchema | NotGiven = NOT_GIVEN):
+    def set_tools(
+        self,
+        tools: ToolsSchema | list[FunctionSchema | DirectFunction] | NotGiven = NOT_GIVEN,
+    ):
         """Set the available tools for the LLM.
 
         Args:
-            tools: A ToolsSchema or NOT_GIVEN to disable tools.
+            tools: A ToolsSchema, a plain list of direct functions and/or
+                ``FunctionSchema`` objects, or NOT_GIVEN to disable tools.
         """
         self._tools = LLMContext._normalize_and_validate_tools(tools)
 
@@ -456,13 +449,54 @@ class LLMContext:
         message = await LLMContext.create_audio_message(audio_frames=audio_frames, text=text)
         self.add_message(message)
 
+    @overload
     @staticmethod
-    def _normalize_and_validate_tools(tools: ToolsSchema | NotGiven) -> ToolsSchema | NotGiven:
+    def _normalize_and_validate_tools(
+        tools: ToolsSchema | list[FunctionSchema | DirectFunction] | NotGiven,
+        *,
+        allow_provider_tools: Literal[False] = False,
+    ) -> ToolsSchema | NotGiven: ...
+
+    @overload
+    @staticmethod
+    def _normalize_and_validate_tools(
+        tools: ToolsSchema | list[Any] | NotGiven,
+        *,
+        allow_provider_tools: Literal[True],
+    ) -> ToolsSchema | list[Any] | NotGiven: ...
+
+    @staticmethod
+    def _normalize_and_validate_tools(
+        tools: ToolsSchema | list[Any] | NotGiven,
+        *,
+        allow_provider_tools: bool = False,
+    ) -> ToolsSchema | list[Any] | NotGiven:
         """Normalize and validate the given tools.
 
+        A plain list of direct functions and/or ``FunctionSchema`` objects is
+        wrapped in a ``ToolsSchema``.
+
+        Args:
+            tools: The tools to normalize: a ``ToolsSchema``, a list of direct
+                functions and/or ``FunctionSchema`` objects, or ``NOT_GIVEN``.
+            allow_provider_tools: If True, a list that isn't entirely standard
+                tools (direct functions / ``FunctionSchema`` objects) is taken to
+                be already-formatted, provider-native tools and returned
+                unchanged rather than raising. For callers whose tools parameter
+                accepts provider-native tools alongside standard ones.
+
         Raises:
-            TypeError: If tools are not a ToolsSchema or NotGiven.
+            TypeError: If tools aren't a ``ToolsSchema``, list, or ``NOT_GIVEN`` —
+                or, unless ``allow_provider_tools`` is set, if a list contains
+                anything other than standard tools.
         """
+        if isinstance(tools, list):
+            if allow_provider_tools and not all(
+                isinstance(t, FunctionSchema) or callable(t) for t in tools
+            ):
+                # Already-formatted, provider-native tools; pass through unchanged.
+                return tools
+            tools = ToolsSchema(standard_tools=tools)
         if isinstance(tools, ToolsSchema):
             if not tools.standard_tools and not tools.custom_tools:
                 return NOT_GIVEN
@@ -471,5 +505,6 @@ class LLMContext:
             return NOT_GIVEN
         else:
             raise TypeError(
-                f"In LLMContext, tools must be a ToolsSchema object or NOT_GIVEN. Got type: {type(tools)}",
+                "In LLMContext, tools must be a ToolsSchema, a list of direct functions / "
+                f"FunctionSchema objects, or NOT_GIVEN. Got type: {type(tools)}",
             )

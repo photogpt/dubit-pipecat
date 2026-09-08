@@ -20,17 +20,18 @@ from pipecat.frames.frames import (
     Frame,
     TTSStoppedFrame,
 )
-from pipecat.services.settings import TTSSettings, assert_given
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import assert_given
 
 try:
     from piper import PiperVoice
     from piper.download_voices import download_voice
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use Piper, you need to `pip install pipecat-ai[piper]`.")
-    raise Exception(f"Missing module: {e}")
+    logger.error('In order to use Piper, you need to `uv add "pipecat-ai[piper]"`.')
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -46,6 +47,14 @@ class PiperTTSService(TTSService):
     Provides local text-to-speech synthesis using Piper voice models. Automatically
     downloads voice models if not already present and resamples audio output to
     match the configured sample rate.
+
+    .. note::
+        This service runs Piper in-process via the ``piper-tts`` package (the
+        ``piper`` extra), which is **GPL-3.0 licensed**. Distributing an
+        application that includes it may subject the application to the GPL's
+        source-disclosure terms. To keep Piper out of your application's
+        license scope, use :class:`PiperHttpTTSService` instead, which talks to
+        a separately installed Piper HTTP server.
     """
 
     Settings = PiperTTSSettings
@@ -68,6 +77,7 @@ class PiperTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=PiperTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             download_dir: Directory for storing voice model files. Defaults to
                 the current working directory.
@@ -161,8 +171,6 @@ class PiperTTSService(TTSService):
                     return
                 yield item.audio_int16_bytes
 
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         try:
             await self.start_tts_usage_metrics(text)
 
@@ -225,6 +233,7 @@ class PiperHttpTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=PiperHttpTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -277,7 +286,6 @@ class PiperHttpTTSService(TTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech and status frames.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
         headers = {
             "Content-Type": "application/json",
         }

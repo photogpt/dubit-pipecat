@@ -15,8 +15,7 @@ from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -26,6 +25,7 @@ from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.tavus.transport import TavusParams, TavusTransport
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
@@ -44,6 +44,7 @@ async def main():
                 audio_in_enabled=True,
                 audio_out_enabled=True,
                 microphone_out_enabled=False,
+                audio_out_faster_than_realtime=True,
             ),
         )
 
@@ -81,7 +82,7 @@ async def main():
             ]
         )
 
-        task = PipelineTask(
+        worker = PipelineWorker(
             pipeline,
             params=PipelineParams(
                 audio_in_sample_rate=16000,
@@ -89,7 +90,12 @@ async def main():
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
+            processor_unusable_policy=ProcessorUnusablePolicy.END,
         )
+
+        runner = WorkerRunner()
+
+        await runner.add_workers(worker)
 
         @transport.event_handler("on_connected")
         async def on_connected(transport, data):
@@ -101,7 +107,7 @@ async def main():
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, participant):
-            logger.info(f"Client connected")
+            logger.info("Client connected")
             # Kick off the conversation.
             context.add_message(
                 {
@@ -109,16 +115,14 @@ async def main():
                     "content": "Start by greeting the user and ask how you can help.",
                 }
             )
-            await task.queue_frames([LLMRunFrame()])
+            await worker.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, participant):
-            logger.info(f"Client disconnected")
-            await task.cancel()
+            logger.info("Client disconnected")
+            await runner.cancel()
 
-        runner = PipelineRunner()
-
-        await runner.run(task)
+        await runner.run()
 
 
 if __name__ == "__main__":

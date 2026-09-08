@@ -9,10 +9,12 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.frames.frames import Frame, TranscriptionFrame
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
+from pipecat.frames.frames import Frame, InterimTranscriptionFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker, ProcessorUnusablePolicy
+from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -20,6 +22,7 @@ from pipecat.services.xai.stt import XAISTTService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
@@ -30,12 +33,18 @@ class TranscriptionLogger(FrameProcessor):
 
         if isinstance(frame, TranscriptionFrame):
             print(f"Transcription: {frame.text}")
+        elif isinstance(frame, InterimTranscriptionFrame):
+            print(f"Interim transcription: {frame.text}")
 
         # Push all frames through
         await self.push_frame(frame, direction)
 
 
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
     ),
@@ -49,29 +58,34 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     stt = XAISTTService(
-        api_key=os.getenv("XAI_API_KEY"),
+        api_key=os.environ["XAI_API_KEY"],
     )
 
     tl = TranscriptionLogger()
 
-    pipeline = Pipeline([transport.input(), stt, tl])
+    vad_processor = VADProcessor(vad_analyzer=SileroVADAnalyzer())
 
-    task = PipelineTask(
+    pipeline = Pipeline([transport.input(), vad_processor, stt, tl, transport.output()])
+
+    worker = PipelineWorker(
         pipeline,
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await task.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

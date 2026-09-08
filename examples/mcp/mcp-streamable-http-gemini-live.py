@@ -11,15 +11,13 @@ from dotenv import load_dotenv
 from loguru import logger
 from mcp.client.session_group import StreamableHttpParameters
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
-    LLMUserAggregatorParams,
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -28,12 +26,17 @@ from pipecat.services.mcp_service import MCPClient
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -50,9 +53,9 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
-    system = f"""
+    system = """
     You are a helpful LLM in a voice call.
     Your goal is to answer questions about the user's GitHub repositories and account.
     You have access to a number of tools provided by Github. Use any and all tools to help users.
@@ -65,61 +68,71 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # Enable Github Copilot on your GitHub account. Free tier is ok. (https://github.com/settings/copilot)
     # Generate a personal access token. It must be a Fine-grained token, classic tokens are not supported. (https://github.com/settings/personal-access-tokens)
     # Set permissions you want to use (eg. "all repositories", "profile: read/write", etc)
-    async with MCPClient(
+    mcp = MCPClient(
         server_params=StreamableHttpParameters(
             url="https://api.githubcopilot.com/mcp/",
             headers={"Authorization": f"Bearer {os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN')}"},
         )
-    ) as mcp:
-        tools = await mcp.get_tools_schema()
+    )
 
-        llm = GeminiLiveLLMService(
-            api_key=os.environ["GOOGLE_API_KEY"],
-            system_instruction=system,
-            tools=tools,
-        )
+    llm = GeminiLiveLLMService(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        system_instruction=system,
+        tools=await mcp.tools(),
+    )
 
-        await mcp.register_tools_schema(tools, llm)
+    context = LLMContext([{"role": "user", "content": "Please introduce yourself."}])
+    # Gemini Live doesn't emit user-turn frames. Server-side VAD is
+    # enabled by default; to surface turn frames (for RTVI speech
+    # events, turn observers, etc.) uncomment the local-VAD imports
+    # + `user_params=` below. See realtime-gemini-live.py for the
+    # full discussion.
+    #
+    # from pipecat.audio.vad.silero import SileroVADAnalyzer
+    # from pipecat.processors.aggregators.llm_response_universal import (
+    #     LLMUserAggregatorParams,
+    # )
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        # user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+    )
 
-        context = LLMContext([{"role": "user", "content": "Please introduce yourself."}])
-        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
-            context,
-            user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
-        )
+    pipeline = Pipeline(
+        [
+            transport.input(),  # Transport user input
+            user_aggregator,  # User spoken responses
+            llm,  # LLM
+            transport.output(),  # Transport bot output
+            assistant_aggregator,  # Assistant spoken responses and tool context
+        ]
+    )
 
-        pipeline = Pipeline(
-            [
-                transport.input(),  # Transport user input
-                user_aggregator,  # User spoken responses
-                llm,  # LLM
-                transport.output(),  # Transport bot output
-                assistant_aggregator,  # Assistant spoken responses and tool context
-            ]
-        )
+    worker = PipelineWorker(
+        pipeline,
+        params=PipelineParams(
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
+    )
 
-        task = PipelineTask(
-            pipeline,
-            params=PipelineParams(
-                enable_metrics=True,
-                enable_usage_metrics=True,
-            ),
-            idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
-        )
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
 
-        @transport.event_handler("on_client_connected")
-        async def on_client_connected(transport, client):
-            logger.info(f"Client connected: {client}")
-            # Kick off the conversation.
-            await task.queue_frames([LLMRunFrame()])
+    await runner.add_workers(worker)
 
-        @transport.event_handler("on_client_disconnected")
-        async def on_client_disconnected(transport, client):
-            logger.info(f"Client disconnected")
-            await task.cancel()
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info(f"Client connected: {client}")
+        # Kick off the conversation.
+        await worker.queue_frames([LLMRunFrame()])
 
-        runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-        await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):
@@ -131,7 +144,7 @@ async def bot(runner_args: RunnerArguments):
 if __name__ == "__main__":
     if not os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN"):
         logger.error(
-            f"Please set GITHUB_PERSONAL_ACCESS_TOKEN environment variable for this example."
+            "Please set GITHUB_PERSONAL_ACCESS_TOKEN environment variable for this example."
         )
         import sys
 

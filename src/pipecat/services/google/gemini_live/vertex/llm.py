@@ -35,8 +35,8 @@ try:
 
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error("In order to use Google Vertex AI, you need to `pip install pipecat-ai[google]`.")
-    raise Exception(f"Missing module: {e}")
+    logger.error('In order to use Google Vertex AI, you need to `uv add "pipecat-ai[google]"`.')
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -88,11 +88,14 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GeminiLiveVertexLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             voice_id: TTS voice identifier. Defaults to "Charon".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GeminiLiveVertexLLMService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
+
             start_audio_paused: Whether to start with audio input paused. Defaults to False.
             start_video_paused: Whether to start with video input paused. Defaults to False.
             system_instruction: System prompt for the model. Defaults to None.
@@ -102,6 +105,7 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GeminiLiveVertexLLMService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Gemini Live LLM settings. If provided together with deprecated
                 top-level parameters, the ``settings`` values take precedence.
@@ -237,6 +241,20 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
         raise NotImplementedError(
             "When using Vertex AI, the recommended approach is to use Google Cloud Storage for file handling. The Gemini File API is not directly supported in this context."
         )
+
+    @property
+    def _supports_non_blocking_tools(self) -> bool:
+        """Vertex AI's Gemini Live endpoint does not yet support NON_BLOCKING tool calls.
+
+        Override the base ``GeminiLiveLLMService`` getter to disable the
+        NON_BLOCKING ``behavior`` field on function declarations and the
+        ``scheduling`` field on FunctionResponse for Vertex sessions —
+        sending either appears to break tool calling against Vertex.
+        Users hitting this on a function registered with
+        ``cancel_on_interruption=False`` will see the same one-time
+        warning the base class surfaces for unsupported models.
+        """
+        return False
 
     @staticmethod
     def _get_credentials(

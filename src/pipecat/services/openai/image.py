@@ -26,7 +26,8 @@ from pipecat.frames.frames import (
     URLImageRawFrame,
 )
 from pipecat.services.image_service import ImageGenService
-from pipecat.services.settings import NOT_GIVEN, ImageGenSettings, _NotGiven, assert_given
+from pipecat.services.settings import ImageGenSettings
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 # Hint set for the `size` argument to `images.generate`. The values mirror the
 # Literal that `openai.resources.images.Images.generate` accepts on its `size`
@@ -60,7 +61,7 @@ class OpenAIImageGenSettings(ImageGenSettings):
         image_size: Target size for generated images.
     """
 
-    image_size: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    image_size: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class OpenAIImageGenService(ImageGenService):
@@ -95,11 +96,13 @@ class OpenAIImageGenService(ImageGenService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAIImageGenService.Settings(image_size=...)`` instead.
+                    Will be removed in 2.0.0.
 
             model: DALL-E model to use for generation. Defaults to "dall-e-3".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAIImageGenService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -162,7 +165,7 @@ class OpenAIImageGenService(ImageGenService):
             frame = URLImageRawFrame(
                 image=image.tobytes(),
                 size=image.size,
-                format=image.format,
+                format=image.mode,
                 url=image_url,
             )
             yield frame

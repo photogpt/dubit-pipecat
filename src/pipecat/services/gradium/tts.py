@@ -12,28 +12,22 @@ from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
+from websockets import ConnectionClosedOK
+from websockets.protocol import State
 
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
     ErrorFrame,
     Frame,
-    StartFrame,
     TTSAudioRawFrame,
     TTSStoppedFrame,
 )
+from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import WebsocketTTSService
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
-
-try:
-    from websockets import ConnectionClosedOK
-    from websockets.asyncio.client import connect as websocket_connect
-    from websockets.protocol import State
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error("In order to use Gradium, you need to `pip install pipecat-ai[gradium]`.")
-    raise Exception(f"Missing module: {e}")
 
 SAMPLE_RATE = 48000
 
@@ -51,11 +45,16 @@ class GradiumTTSService(WebsocketTTSService):
     Settings = GradiumTTSSettings
     _settings: Settings
 
+    @deprecated(
+        "`GradiumTTSService.InputParams` is deprecated since 0.0.105 and will be removed in "
+        "2.0.0. Use `GradiumTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Configuration parameters for Gradium TTS service.
 
         .. deprecated:: 0.0.105
             Use ``GradiumTTSService.Settings`` directly via the ``settings`` parameter instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             temp: Temperature to be used for generation, defaults to 0.6.
@@ -68,7 +67,7 @@ class GradiumTTSService(WebsocketTTSService):
         *,
         api_key: str,
         voice_id: str | None = None,
-        url: str = "wss://eu.api.gradium.ai/api/speech/tts",
+        url: str = "wss://api.gradium.ai/api/speech/tts",
         model: str | None = None,
         json_config: str | None = None,
         params: InputParams | None = None,
@@ -83,18 +82,21 @@ class GradiumTTSService(WebsocketTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GradiumTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             url: Gradium websocket API endpoint.
             model: Model ID to use for synthesis.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GradiumTTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             json_config: Optional JSON configuration string for additional model settings.
             params: Additional configuration parameters.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GradiumTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -103,7 +105,7 @@ class GradiumTTSService(WebsocketTTSService):
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
             model="default",
-            voice="YTpq7expH9539ERJ",
+            voice="_6Aslh2DxfmnRLmP",
             language=None,
         )
 
@@ -190,13 +192,13 @@ class GradiumTTSService(WebsocketTTSService):
         msg = {"text": text, "type": "text", "client_req_id": context_id}
         return msg
 
-    async def start(self, frame: StartFrame):
-        """Start the service and establish websocket connection.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service and connect.
 
         Args:
-            frame: The start frame containing initialization parameters.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
         await self._connect()
 
     async def stop(self, frame: EndFrame):
@@ -253,7 +255,7 @@ class GradiumTTSService(WebsocketTTSService):
                 return
 
             headers = {"x-api-key": self._api_key, "x-api-source": "pipecat"}
-            self._websocket = await websocket_connect(self._url, additional_headers=headers)
+            self._websocket = await self._websocket_connect(self._url, additional_headers=headers)
 
             await self._call_event_handler("on_connected")
         except Exception as e:
@@ -366,7 +368,6 @@ class GradiumTTSService(WebsocketTTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
         try:
             if not self._websocket or self._websocket.state is State.CLOSED:
                 self._websocket = None

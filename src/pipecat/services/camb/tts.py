@@ -20,21 +20,23 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
-from camb import StreamTtsOutputConfiguration
 from camb.client import AsyncCambAI
+from camb.types import StreamTtsOutputConfiguration
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
-    StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
+from pipecat.processors.frame_processor import FrameProcessorSetup
+from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 # Model-specific sample rates
 MODEL_SAMPLE_RATES: dict[str, int] = {
@@ -148,8 +150,8 @@ class CambTTSSettings(TTSSettings):
             Ignored for other models. Max 1000 characters.
     """
 
-    voice: int | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    user_instructions: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    voice: int | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    user_instructions: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class CambTTSService(TTSService):
@@ -185,11 +187,16 @@ class CambTTSService(TTSService):
     Settings = CambTTSSettings
     _settings: Settings
 
+    @deprecated(
+        "`CambTTSService.InputParams` is deprecated since 0.0.105 and will be removed in 2.0.0. "
+        "Use `CambTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for Camb.ai TTS configuration.
 
         .. deprecated:: 0.0.105
             Use ``settings=CambTTSService.Settings(...)`` instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             language: Language for synthesis (BCP-47 format). Defaults to English.
@@ -225,11 +232,13 @@ class CambTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=CambTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             model: TTS model to use. Options: "mars-flash" (fast), "mars-pro" (high quality).
 
                 .. deprecated:: 0.0.105
                     Use ``settings=CambTTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             timeout: Request timeout in seconds. Defaults to 60.0 (minimum recommended
                 by Camb.ai).
@@ -238,6 +247,7 @@ class CambTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=CambTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -312,13 +322,13 @@ class CambTTSService(TTSService):
         """
         return language_to_camb_language(language)
 
-    async def start(self, frame: StartFrame):
-        """Start the Camb.ai TTS service.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service.
 
         Args:
-            frame: The start frame containing initialization parameters.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
 
         self._client = AsyncCambAI(api_key=self._api_key, timeout=self._timeout)
 
@@ -338,8 +348,6 @@ class CambTTSService(TTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         # Validate text length
         if len(text) > 3000:
             logger.warning("Text too long for Camb.ai TTS (max 3000 chars), truncating")

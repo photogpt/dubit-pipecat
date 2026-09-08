@@ -14,6 +14,7 @@ import numpy as np
 from loguru import logger
 
 from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
+from pipecat.audio.resamplers.base_audio_resampler import SoxrQuality
 from pipecat.frames.frames import FilterControlFrame, FilterEnableFrame
 
 try:
@@ -21,9 +22,7 @@ try:
 except ModuleNotFoundError as e:
     RNNoise = None
     logger.error(f"Exception: {e}")
-    logger.error(
-        "In order to use the RNNoise filter, you need to `pip install pipecat-ai[rnnoise]`."
-    )
+    logger.error('In order to use the RNNoise filter, you need to `uv add "pipecat-ai[rnnoise]"`.')
 
 
 class RNNoiseFilter(BaseAudioFilter):
@@ -35,7 +34,7 @@ class RNNoiseFilter(BaseAudioFilter):
     processes it in chunks.
     """
 
-    def __init__(self, resampler_quality: str = "QQ") -> None:
+    def __init__(self, resampler_quality: SoxrQuality = "QQ") -> None:
         """Initialize the RNNoise noise suppression filter.
 
         Args:
@@ -49,7 +48,7 @@ class RNNoiseFilter(BaseAudioFilter):
         self._rnnoise_ready = False
         self._resampler_in = None
         self._resampler_out = None
-        self._resampler_quality = resampler_quality
+        self._resampler_quality: SoxrQuality = resampler_quality
 
     async def start(self, sample_rate: int):
         """Initialize the filter with the transport's sample rate.

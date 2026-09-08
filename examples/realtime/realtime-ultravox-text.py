@@ -11,18 +11,14 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.evals.transport import EvalTransportParams
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
     LLMContextAggregatorPair,
-    LLMUserAggregatorParams,
-    UserTurnStoppedMessage,
+    UserTurnMessageAddedMessage,
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
@@ -32,8 +28,7 @@ from pipecat.services.ultravox.llm import OneShotInputParams, UltravoxRealtimeLL
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
-from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.workers.runner import WorkerRunner
 
 # Load environment variables
 load_dotenv(override=True)
@@ -42,6 +37,10 @@ load_dotenv(override=True)
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
 transport_params = {
+    "eval": lambda: EvalTransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
     "daily": lambda: DailyParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -84,7 +83,7 @@ async def get_secret_menu(params: FunctionCallParams):
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     system_prompt = f"""
 You are a drive-thru order taker for a donut shop called "Dr. Donut". Local time is currently: {datetime.datetime.now().isoformat()}
@@ -164,6 +163,7 @@ There is also a secret menu that changes daily. If the user asks about it, use t
             },
         },
         required=[],
+        handler=get_secret_menu,
     )
 
     llm = UltravoxRealtimeLLMService(
@@ -174,10 +174,8 @@ There is also a secret menu that changes daily. If the user asks about it, use t
             max_duration=datetime.timedelta(minutes=3),
             output_medium="text",
         ),
-        one_shot_selected_tools=ToolsSchema(standard_tools=[secret_menu_function]),
+        one_shot_selected_tools=[secret_menu_function],
     )
-
-    llm.register_function("get_secret_menu", get_secret_menu)
 
     tts = InworldTTSService(
         api_key=os.getenv("INWORLD_API_KEY", ""),
@@ -188,17 +186,18 @@ There is also a secret menu that changes daily. If the user asks about it, use t
 
     context = LLMContext([])
 
-    # Necessary to complete the function call lifecycle in Pipecat and
-    # to produce user and assistant turn stopped events.
+    # Ultravox doesn't emit user-turn frames. To get them (for RTVI
+    # speech events, turn observers, etc.) uncomment the local-VAD
+    # imports + `user_params=` below. See realtime-ultravox.py for the
+    # full discussion.
+    #
+    # from pipecat.audio.vad.silero import SileroVADAnalyzer
+    # from pipecat.processors.aggregators.llm_response_universal import (
+    #     LLMUserAggregatorParams,
+    # )
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(
-            user_turn_strategies=UserTurnStrategies(
-                stop=[SpeechTimeoutUserTurnStopStrategy()],
-            ),
-            # Set the VAD analyzer to emulate timing of the model.
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5)),
-        ),
+        # user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
     # Build the pipeline
@@ -213,29 +212,36 @@ There is also a secret menu that changes daily. If the user asks about it, use t
         ]
     )
 
-    # Configure the pipeline task
-    task = PipelineTask(
+    # Configure the pipeline worker
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
+
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
+
+    await runner.add_workers(worker)
 
     # Handle client connection event
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
 
     # Handle client disconnection events
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await task.cancel()
+        logger.info("Client disconnected")
+        await runner.cancel()
 
-    @user_aggregator.event_handler("on_user_turn_stopped")
-    async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
+    # Ultravox doesn't emit user-turn frames; subscribe to the
+    # *_message_added events for the finalized message text.
+    @user_aggregator.event_handler("on_user_turn_message_added")
+    async def on_user_turn_message_added(aggregator, message: UserTurnMessageAddedMessage):
         timestamp = f"[{message.timestamp}] " if message.timestamp else ""
         line = f"{timestamp}user: {message.content}"
         logger.info(f"Transcript: {line}")
@@ -246,9 +252,7 @@ There is also a secret menu that changes daily. If the user asks about it, use t
         line = f"{timestamp}assistant: {message.content}"
         logger.info(f"Transcript: {line}")
 
-    # Run the pipeline
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.run(task)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

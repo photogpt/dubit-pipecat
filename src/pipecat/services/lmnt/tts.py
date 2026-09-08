@@ -12,29 +12,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
+from websockets.protocol import State
 
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
     ErrorFrame,
     Frame,
-    StartFrame,
     TTSAudioRawFrame,
     TTSStoppedFrame,
 )
+from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import InterruptibleTTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
-
-# See .env.example for LMNT configuration needed
-try:
-    from websockets.asyncio.client import connect as websocket_connect
-    from websockets.protocol import State
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error("In order to use LMNT, you need to `pip install pipecat-ai[lmnt]`.")
-    raise Exception(f"Missing module: {e}")
 
 
 def language_to_lmnt_language(language: Language) -> str:
@@ -51,20 +43,30 @@ def language_to_lmnt_language(language: Language) -> str:
     """
     LANGUAGE_MAP = {
         Language.AR: "ar",
+        Language.AS: "as",
+        Language.BN: "bn",
+        Language.CS: "cs",
+        Language.DA: "da",
         Language.DE: "de",
         Language.EN: "en",
         Language.ES: "es",
+        Language.FI: "fi",
         Language.FR: "fr",
         Language.HI: "hi",
         Language.ID: "id",
         Language.IT: "it",
         Language.JA: "ja",
         Language.KO: "ko",
+        Language.ML: "ml",
+        Language.MR: "mr",
         Language.NL: "nl",
         Language.PL: "pl",
         Language.PT: "pt",
         Language.RU: "ru",
+        Language.SK: "sk",
         Language.SV: "sv",
+        Language.TA: "ta",
+        Language.TE: "te",
         Language.TH: "th",
         Language.TR: "tr",
         Language.UK: "uk",
@@ -114,12 +116,14 @@ class LmntTTSService(InterruptibleTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=LmntTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Audio sample rate. If None, uses default.
             language: Language for synthesis. Defaults to English.
 
                 .. deprecated:: 0.0.106
                     Use ``settings=LmntTTSService.Settings(language=...)`` instead.
+                    Will be removed in 2.0.0.
 
             output_format: Audio output format. One of "pcm_s16le", "pcm_f32le",
                 "mp3", "ulaw", "webm". Defaults to "pcm_s16le".
@@ -127,6 +131,7 @@ class LmntTTSService(InterruptibleTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=LmntTTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -134,7 +139,7 @@ class LmntTTSService(InterruptibleTTSService):
         """
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model="aurora",
+            model="blizzard",
             voice=None,
             language=Language.EN,
         )
@@ -188,13 +193,13 @@ class LmntTTSService(InterruptibleTTSService):
         """
         return language_to_lmnt_language(language)
 
-    async def start(self, frame: StartFrame):
-        """Start the LMNT TTS service.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service and connect.
 
         Args:
-            frame: The start frame containing initialization parameters.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
         await self._connect()
 
     async def stop(self, frame: EndFrame):
@@ -270,7 +275,7 @@ class LmntTTSService(InterruptibleTTSService):
             }
 
             # Connect to LMNT's websocket directly
-            websocket = await websocket_connect("wss://api.lmnt.com/v1/ai/speech/stream")
+            websocket = await self._websocket_connect("wss://api.lmnt.com/v1/ai/speech/stream")
             self._websocket = websocket
 
             # Send initialization message
@@ -350,8 +355,6 @@ class LmntTTSService(InterruptibleTTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         try:
             if not self._websocket or self._websocket.state is State.CLOSED:
                 await self._connect()

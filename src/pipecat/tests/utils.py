@@ -19,9 +19,9 @@ from pipecat.frames.frames import (
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.workers.runner import WorkerRunner
 
 
 @dataclass
@@ -132,6 +132,7 @@ async def run_test(
     observers: list[BaseObserver] | None = None,
     pipeline_params: PipelineParams | None = None,
     send_end_frame: bool = True,
+    start_timeout: float = 1.0,
 ) -> tuple[Sequence[Frame], Sequence[Frame]]:
     """Run a test pipeline with the specified processor and validate frame flow.
 
@@ -152,12 +153,15 @@ async def run_test(
         observers: Optional list of observers to attach to the pipeline.
         pipeline_params: Optional pipeline parameters.
         send_end_frame: Whether to send an EndFrame at the end of the test.
+        start_timeout: How long to wait, in seconds, for the pipeline to start
+            before giving up.
 
     Returns:
         Tuple containing (downstream_frames, upstream_frames) that were received.
 
     Raises:
         AssertionError: If the received frames don't match the expected frame types.
+        TimeoutError: If the pipeline doesn't start within ``start_timeout``.
     """
     observers = observers or []
     pipeline_params = pipeline_params or PipelineParams()
@@ -177,7 +181,7 @@ async def run_test(
 
     pipeline = Pipeline([source, processor, sink])
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         cancel_on_idle_timeout=False,
         enable_rtvi=enable_rtvi,
@@ -185,20 +189,28 @@ async def run_test(
         params=pipeline_params,
     )
 
+    pipeline_started = asyncio.Event()
+
+    @worker.event_handler("on_pipeline_started")
+    async def _on_pipeline_started(worker, frame):
+        pipeline_started.set()
+
     async def push_frames():
-        # Just give a little head start to the runner.
-        await asyncio.sleep(0.01)
+        # Processors drop frames that arrive before StartFrame, and upstream
+        # frames enter at the sink, which StartFrame reaches last.
+        await asyncio.wait_for(pipeline_started.wait(), timeout=start_timeout)
         for frame in frames_to_send:
             if isinstance(frame, SleepFrame):
                 await asyncio.sleep(frame.sleep)
             else:
-                await task.queue_frame(frame, frames_to_send_direction)
+                await worker.queue_frame(frame, frames_to_send_direction)
 
         if send_end_frame:
-            await task.queue_frame(EndFrame())
+            await worker.queue_frame(EndFrame())
 
-    runner = PipelineRunner()
-    await asyncio.gather(runner.run(task), push_frames())
+    runner = WorkerRunner()
+    await runner.add_workers(worker)
+    await asyncio.gather(runner.run(), push_frames())
 
     #
     # Down frames

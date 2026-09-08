@@ -7,14 +7,14 @@
 """Pipeline-scoped tracing context for OpenTelemetry tracing in Pipecat.
 
 This module provides a per-pipeline tracing context that holds the current
-conversation and turn span contexts. Each PipelineTask creates its own
+conversation and turn span contexts. Each PipelineWorker creates its own
 TracingContext, ensuring concurrent pipelines do not interfere with each other.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from opentelemetry.context import Context
@@ -31,7 +31,7 @@ class TracingContext:
     """Pipeline-scoped tracing context.
 
     Holds the current conversation and turn span contexts for a single pipeline.
-    Created by PipelineTask, passed to TurnTraceObserver (writer) and services
+    Created by PipelineWorker, passed to TurnTraceObserver (writer) and services
     (readers) via StartFrame.
     """
 

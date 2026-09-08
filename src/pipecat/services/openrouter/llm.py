@@ -18,7 +18,7 @@ from loguru import logger
 from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.services.settings import assert_given
+from pipecat.utils.types import assert_given
 
 
 @dataclass
@@ -37,6 +37,7 @@ class OpenRouterLLMService(OpenAILLMService):
 
     Settings = OpenRouterLLMSettings
     _settings: Settings
+    supports_developer_role = False
 
     def __init__(
         self,
@@ -52,10 +53,11 @@ class OpenRouterLLMService(OpenAILLMService):
         Args:
             api_key: The API key for accessing OpenRouter's API. If None, will attempt
                 to read from environment variables.
-            model: The model identifier to use. Defaults to "openai/gpt-4o-2024-11-20".
+            model: The model identifier to use. Defaults to "openai/gpt-4.1".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenRouterLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             base_url: The base URL for OpenRouter API. Defaults to "https://openrouter.ai/api/v1".
             settings: Runtime-updatable settings. When provided alongside deprecated
@@ -63,7 +65,7 @@ class OpenRouterLLMService(OpenAILLMService):
             **kwargs: Additional keyword arguments passed to OpenAILLMService.
         """
         # 1. Initialize default_settings with hardcoded defaults
-        default_settings = self.Settings(model="openai/gpt-4o-2024-11-20")
+        default_settings = self.Settings(model="openai/gpt-4.1")
 
         # 2. Apply direct init arg overrides (deprecated)
         if model is not None:

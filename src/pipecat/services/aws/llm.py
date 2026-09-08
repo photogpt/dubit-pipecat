@@ -20,6 +20,7 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from pipecat.adapters.base_llm_adapter import LLMContextConversionError
 from pipecat.adapters.services.bedrock_adapter import (
     AWSBedrockLLMAdapter,
     AWSBedrockLLMInvocationParams,
@@ -37,19 +38,21 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.aws.utils import resolve_credentials
 from pipecat.services.llm_service import LLMService
-from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven, assert_given
+from pipecat.services.settings import LLMSettings
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_llm
+from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
 try:
-    import aioboto3
+    import aiobotocore.session
     from botocore.config import Config
     from botocore.exceptions import ReadTimeoutError
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error(
-        "In order to use AWS services, you need to `pip install pipecat-ai[aws]`. Also, remember to set `AWS_SECRET_ACCESS_KEY`, `AWS_ACCESS_KEY_ID`, and `AWS_REGION` environment variable."
+        'In order to use AWS services, you need to `uv add "pipecat-ai[aws]"`. Also, remember to set `AWS_SECRET_ACCESS_KEY`, `AWS_ACCESS_KEY_ID`, and `AWS_REGION` environment variable.'
     )
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -66,10 +69,10 @@ class AWSBedrockLLMSettings(LLMSettings):
         additional_model_request_fields: Additional model-specific parameters.
     """
 
-    stop_sequences: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    latency: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    enable_prompt_caching: bool | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    additional_model_request_fields: dict[str, Any] | _NotGiven = field(
+    stop_sequences: list[str] | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    latency: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    enable_prompt_caching: bool | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    additional_model_request_fields: dict[str, Any] | NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
 
@@ -88,12 +91,17 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
     # Overriding the default adapter to use the Anthropic one.
     adapter_class = AWSBedrockLLMAdapter
 
+    @deprecated(
+        "`AWSBedrockLLMService.InputParams` is deprecated since 0.0.105 and will be removed in "
+        "2.0.0. Use `AWSBedrockLLMService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for AWS Bedrock LLM service.
 
         .. deprecated:: 0.0.105
             Use ``AWSBedrockLLMService.Settings`` instead. Pass settings directly via the
             ``settings`` parameter of :class:`AWSBedrockLLMService`.
+            Will be removed in 2.0.0.
 
         Parameters:
             max_tokens: Maximum number of tokens to generate.
@@ -134,9 +142,10 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSBedrockLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             aws_access_key: AWS access key ID. If None, falls back to
-                environment variables and the default boto3 credential chain
+                environment variables and the default botocore credential chain
                 (instance profiles, IRSA, ECS task roles, SSO, etc.).
             aws_secret_key: AWS secret access key. Same fallback behaviour as
                 ``aws_access_key``.
@@ -146,6 +155,7 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSBedrockLLMService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings for this service.  When both
                 deprecated parameters and *settings* are provided, *settings*
@@ -154,8 +164,9 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AWSBedrockLLMService.Settings(stop_sequences=...)`` instead.
+                    Will be removed in 2.0.0.
 
-            client_config: Custom boto3 client configuration.
+            client_config: Custom botocore client configuration.
             retry_timeout_secs: Request timeout in seconds for retry logic.
             retry_on_timeout: Whether to retry the request once if it times out.
             **kwargs: Additional arguments passed to parent LLMService.
@@ -216,9 +227,9 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
                 retries={"max_attempts": 3},
             )
 
-        self._aws_session = aioboto3.Session()
+        self._aws_session = aiobotocore.session.get_session()
 
-        # Resolve credentials using the shared chain (explicit → env → boto3).
+        # Resolve credentials using the shared chain (explicit → env → botocore).
         resolved = resolve_credentials(
             aws_access_key_id=aws_access_key,
             aws_secret_access_key=aws_secret_key,
@@ -287,7 +298,9 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
         )
         adapter = self.get_llm_adapter()
         params = adapter.get_llm_invocation_params(
-            context, system_instruction=effective_instruction
+            context,
+            system_instruction=effective_instruction,
+            ensure_last_message_is_user=self._should_inject_trailing_user_message(),
         )
         messages = params["messages"]
         system = params["system"]  # [{"text": "system message"}] or None
@@ -311,7 +324,9 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
         if system:
             request_params["system"] = system
 
-        async with self._aws_session.client(
+        # The aiobotocore client is untyped; its methods are created dynamically.
+        client: Any
+        async with self._aws_session.create_client(
             service_name="bedrock-runtime", **self._aws_params
         ) as client:
             # Call Bedrock without streaming
@@ -349,7 +364,7 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
                     client.converse_stream(**request_params), timeout=self._retry_timeout_secs
                 )
                 return response
-            except (TimeoutError, ReadTimeoutError) as e:
+            except (TimeoutError, ReadTimeoutError):
                 # Retry, this time without a timeout so we get a response
                 logger.debug(f"{self}: Retrying converse_stream due to timeout")
                 response = await client.converse_stream(**request_params)
@@ -373,10 +388,46 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
             }
         }
 
+    # Claude models known to support assistant message prefilling (a request
+    # whose message list ends with an assistant message). Anthropic dropped
+    # prefill support starting with the 4.6-generation models, so this is a
+    # frozen legacy set: any Claude model NOT matching is assumed to reject
+    # prefill and gets a trailing user message injected when needed.
+    _PREFILL_SUPPORTED_PATTERNS = (
+        "claude-2",
+        "claude-instant",
+        "claude-3",
+        "claude-opus-4-0",
+        "claude-opus-4-1",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+    )
+
+    def _should_inject_trailing_user_message(self) -> bool:
+        """Whether to fix up requests whose message list ends with an assistant message.
+
+        Claude models without assistant-prefill support reject such requests,
+        so injection is on for any Claude model not known to support prefill.
+        Non-Claude Bedrock models are left untouched. Subclasses with exotic
+        model naming can override ``_PREFILL_SUPPORTED_PATTERNS``.
+
+        Bedrock model identifiers typically look like
+        ``us.anthropic.claude-sonnet-4-6-v1:0`` or
+        ``anthropic.claude-opus-4-6-v1:0``, so patterns are matched as
+        substrings.
+        """
+        model = assert_given(self._settings.model) or ""
+        if "claude" not in model:
+            return False
+        return not any(p in model for p in self._PREFILL_SUPPORTED_PATTERNS)
+
     def _get_llm_invocation_params(self, context: LLMContext) -> AWSBedrockLLMInvocationParams:
         adapter = self.get_llm_adapter()
         params = adapter.get_llm_invocation_params(
-            context, system_instruction=assert_given(self._settings.system_instruction)
+            context,
+            system_instruction=assert_given(self._settings.system_instruction),
+            ensure_last_message_is_user=self._should_inject_trailing_user_message(),
         )
         return params
 
@@ -439,7 +490,7 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
                 using_noop_tool = True
 
             if tools:
-                tool_config = {"tools": tools}
+                tool_config: dict[str, Any] = {"tools": tools}
 
                 # Only add tool_choice if we have real tools (not just no-op)
                 if not using_noop_tool and tool_choice:
@@ -482,47 +533,66 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
             messages_for_logging = adapter.get_messages_for_logging(context)
             logger.debug(f"{self}: Generating chat from context {messages_for_logging}")
 
-            async with self._aws_session.client(
+            async with self._aws_session.create_client(
                 service_name="bedrock-runtime", **self._aws_params
             ) as client:
                 # Call AWS Bedrock with streaming
                 response = await self._create_converse_stream(client, request_params)
 
-                await self.stop_ttfb_metrics()
-
-                # Process the streaming response
-                tool_use_block = None
-                json_accumulator = ""
+                # Process the streaming response. Bedrock emits each tool call as
+                # its own content block, identified by contentBlockIndex, so we key
+                # accumulators by index to capture parallel tool calls instead of
+                # only the last one.
+                tool_use_blocks = {}
+                json_accumulators = {}
 
                 function_calls = []
 
                 async for event in response["stream"]:
+                    # The events that open the stream (messageStart) carry no
+                    # model output, so TTFB ends at the first content block.
+                    if "contentBlockStart" in event or "contentBlockDelta" in event:
+                        await self.stop_ttfb_metrics()
+
                     # Handle text content
                     if "contentBlockDelta" in event:
-                        delta = event["contentBlockDelta"]["delta"]
+                        block = event["contentBlockDelta"]
+                        delta = block["delta"]
                         if "text" in delta:
                             await self._push_llm_text(delta["text"])
                             completion_tokens_estimate += self._estimate_tokens(delta["text"])
                         elif "toolUse" in delta and "input" in delta["toolUse"]:
                             # Handle partial JSON for tool use
-                            json_accumulator += delta["toolUse"]["input"]
+                            index = block["contentBlockIndex"]
+                            json_accumulators[index] = (
+                                json_accumulators.get(index, "") + delta["toolUse"]["input"]
+                            )
                             completion_tokens_estimate += self._estimate_tokens(
                                 delta["toolUse"]["input"]
                             )
 
                     # Handle tool use start
                     elif "contentBlockStart" in event:
-                        content_block_start = event["contentBlockStart"]["start"]
+                        block = event["contentBlockStart"]
+                        content_block_start = block["start"]
                         if "toolUse" in content_block_start:
-                            tool_use_block = {
+                            # A turn that only calls tools produces no answer text,
+                            # so the call itself is what the caller gets and TTFAT
+                            # ends here rather than going unmeasured.
+                            await self.stop_ttfat_metrics()
+                            index = block["contentBlockIndex"]
+                            tool_use_blocks[index] = {
                                 "id": content_block_start["toolUse"].get("toolUseId", ""),
                                 "name": content_block_start["toolUse"].get("name", ""),
                             }
-                            json_accumulator = ""
+                            json_accumulators[index] = ""
 
-                    # Handle message completion with tool use
-                    elif "messageStop" in event and "stopReason" in event["messageStop"]:
-                        if event["messageStop"]["stopReason"] == "tool_use" and tool_use_block:
+                    # Handle tool use completion
+                    elif "contentBlockStop" in event:
+                        index = event["contentBlockStop"]["contentBlockIndex"]
+                        tool_use_block = tool_use_blocks.pop(index, None)
+                        if tool_use_block:
+                            json_accumulator = json_accumulators.pop(index, "")
                             try:
                                 arguments = json.loads(json_accumulator) if json_accumulator else {}
 
@@ -558,6 +628,8 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
             raise
         except (TimeoutError, ReadTimeoutError):
             await self._call_event_handler("on_completion_timeout")
+        except LLMContextConversionError as e:
+            await self.push_error(error_msg=str(e), exception=e)
         except Exception as e:
             await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
         finally:
@@ -602,11 +674,25 @@ class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
         cache_read_input_tokens: int,
         cache_creation_input_tokens: int,
     ):
-        if prompt_tokens or completion_tokens:
+        if (
+            prompt_tokens
+            or completion_tokens
+            or cache_read_input_tokens
+            or cache_creation_input_tokens
+        ):
             tokens = LLMTokenUsage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
+                # Bedrock reports inputTokens net of the cache, so the cached
+                # tokens are added back. The provider's own totalTokens is unused
+                # because an interrupted turn reports an estimated completion
+                # count, which the total has to agree with.
+                total_tokens=(
+                    prompt_tokens
+                    + cache_creation_input_tokens
+                    + cache_read_input_tokens
+                    + completion_tokens
+                ),
                 cache_read_input_tokens=cache_read_input_tokens,
                 cache_creation_input_tokens=cache_creation_input_tokens,
             )

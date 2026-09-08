@@ -13,10 +13,10 @@ from loguru import logger
 
 from pipecat.frames.frames import EndFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker, ProcessorUnusablePolicy
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
@@ -30,21 +30,23 @@ async def main():
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
-            voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
         ),
     )
 
     pipeline = Pipeline([tts, transport.output()])
 
-    task = PipelineTask(pipeline)
+    worker = PipelineWorker(pipeline, processor_unusable_policy=ProcessorUnusablePolicy.END)
+
+    runner = WorkerRunner(handle_sigint=False if sys.platform == "win32" else True)
+
+    await runner.add_workers(worker)
 
     async def say_something():
         await asyncio.sleep(1)
-        await task.queue_frames([TTSSpeakFrame("Hello there, how is it going!"), EndFrame()])
+        await worker.queue_frames([TTSSpeakFrame("Hello there, how is it going!"), EndFrame()])
 
-    runner = PipelineRunner(handle_sigint=False if sys.platform == "win32" else True)
-
-    await asyncio.gather(runner.run(task), say_something())
+    await asyncio.gather(runner.run(), say_something())
 
 
 if __name__ == "__main__":

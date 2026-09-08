@@ -14,32 +14,23 @@ from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
+import websockets
 from loguru import logger
 from pydantic import BaseModel
+from websockets.protocol import State
 
 from pipecat.frames.frames import (
-    CancelFrame,
-    EndFrame,
     ErrorFrame,
     Frame,
-    StartFrame,
     TTSAudioRawFrame,
     TTSStoppedFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TextAggregationMode, TTSService, WebsocketTTSService
 from pipecat.transcriptions.language import Language, resolve_language
+from pipecat.utils.deprecation import deprecated
 from pipecat.utils.tracing.service_decorators import traced_tts
-
-try:
-    import websockets
-    from websockets.asyncio.client import connect as websocket_connect
-    from websockets.protocol import State
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error("In order to use Async, you need to `pip install pipecat-ai[asyncai]`.")
-    raise Exception(f"Missing module: {e}")
 
 
 def language_to_async_language(language: Language) -> str:
@@ -90,13 +81,21 @@ class AsyncAITTSService(WebsocketTTSService):
     """
 
     Settings = AsyncAITTSSettings
+
+    #: Settings baked into the websocket init message, and therefore only
+    #: changeable by starting a new session.
+    _SESSION_INIT_FIELDS = frozenset({"model", "voice", "language"})
     _settings: Settings
 
+    @deprecated(
+        "`AsyncAITTSService.InputParams` is deprecated since 0.0.105 and will be removed in 2.0.0. "
+        "Use `AsyncAITTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for Async TTS configuration.
 
         .. deprecated:: 0.0.105
-            Use ``AsyncAITTSService.Settings`` directly via the ``settings`` parameter instead.
+            Use ``AsyncAITTSService.Settings`` directly via the ``settings`` parameter instead. Will be removed in 2.0.0.
 
         Parameters:
             language: Language to use for synthesis.
@@ -130,13 +129,15 @@ class AsyncAITTSService(WebsocketTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AsyncAITTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             version: Async API version.
             url: WebSocket URL for Async TTS API.
-            model: TTS model to use (e.g., "async_flash_v1.0").
+            model: TTS model to use (e.g., "async_flash_v1.5").
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AsyncAITTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             sample_rate: Audio sample rate.
             encoding: Audio encoding format.
@@ -145,6 +146,7 @@ class AsyncAITTSService(WebsocketTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AsyncAITTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -152,13 +154,14 @@ class AsyncAITTSService(WebsocketTTSService):
 
                 .. deprecated:: 0.0.104
                     Use ``text_aggregation_mode`` instead.
+                    Will be removed in 2.0.0.
 
             text_aggregation_mode: How to aggregate text before synthesis.
             **kwargs: Additional arguments passed to the parent service.
         """
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model="async_flash_v1.0",
+            model="async_flash_v1.5",
             voice=None,
             language=None,
         )
@@ -205,16 +208,29 @@ class AsyncAITTSService(WebsocketTTSService):
         self._keepalive_task = None
 
     async def _update_settings(self, delta: TTSSettings) -> dict[str, Any]:
-        """Apply a settings delta.
+        """Apply a settings delta, reconnecting when a session-init field changes.
 
-        Settings are stored but not applied to the active connection.
+        ``model``, ``voice`` and ``language`` are sent once in the init message at
+        connect time and are never repeated per utterance — ``_build_msg`` carries
+        only the transcript and context id — so a new websocket session is the only
+        way a change to any of them reaches Async.
+
+        Args:
+            delta: A settings delta.
+
+        Returns:
+            Dict mapping changed field names to their previous values.
         """
         changed = await super()._update_settings(delta)
 
         if not changed:
             return changed
 
-        self._warn_unhandled_updated_settings(changed)
+        if self._SESSION_INIT_FIELDS & changed.keys():
+            await self._disconnect()
+            await self._connect()
+
+        self._warn_unhandled_updated_settings(changed.keys() - self._SESSION_INIT_FIELDS)
 
         return changed
 
@@ -241,33 +257,15 @@ class AsyncAITTSService(WebsocketTTSService):
         msg = {"transcript": text, "context_id": context_id, "force": force}
         return json.dumps(msg)
 
-    async def start(self, frame: StartFrame):
-        """Start the Async TTS service.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service and connect.
 
         Args:
-            frame: The start frame containing initialization parameters.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
         self._output_sample_rate = self.sample_rate
         await self._connect()
-
-    async def stop(self, frame: EndFrame):
-        """Stop the Async TTS service.
-
-        Args:
-            frame: The end frame.
-        """
-        await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        """Cancel the Async TTS service.
-
-        Args:
-            frame: The cancel frame.
-        """
-        await super().cancel(frame)
-        await self._disconnect()
 
     async def _connect(self):
         await super()._connect()
@@ -298,7 +296,7 @@ class AsyncAITTSService(WebsocketTTSService):
             if self._websocket and self._websocket.state is State.OPEN:
                 return
             logger.debug("Connecting to Async")
-            self._websocket = await websocket_connect(
+            self._websocket = await self._websocket_connect(
                 f"{self._url}?api_key={self._api_key}&version={self._api_version}"
             )
             init_msg = {
@@ -462,8 +460,6 @@ class AsyncAITTSService(WebsocketTTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         try:
             if not self._websocket or self._websocket.state is State.CLOSED:
                 await self._connect()
@@ -493,11 +489,16 @@ class AsyncAIHttpTTSService(TTSService):
     Settings = AsyncAITTSSettings
     _settings: Settings
 
+    @deprecated(
+        "`AsyncAIHttpTTSService.InputParams` is deprecated since 0.0.105 and will be removed in 2.0.0. "
+        "Use `AsyncAIHttpTTSService.Settings` instead."
+    )
     class InputParams(BaseModel):
         """Input parameters for Async API.
 
         .. deprecated:: 0.0.105
             Use ``AsyncAIHttpTTSService.Settings`` directly via the ``settings`` parameter instead.
+            Will be removed in 2.0.0.
 
         Parameters:
             language: Language to use for synthesis.
@@ -529,12 +530,14 @@ class AsyncAIHttpTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AsyncAIHttpTTSService.Settings(voice=...)`` instead.
+                    Will be removed in 2.0.0.
 
             aiohttp_session: An aiohttp session for making HTTP requests.
-            model: TTS model to use (e.g., "async_flash_v1.0").
+            model: TTS model to use (e.g., "async_flash_v1.5").
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AsyncAIHttpTTSService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             url: Base URL for Async API.
             version: API version string for Async API.
@@ -545,6 +548,7 @@ class AsyncAIHttpTTSService(TTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=AsyncAIHttpTTSService.Settings(...)`` instead.
+                    Will be removed in 2.0.0.
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
@@ -552,7 +556,7 @@ class AsyncAIHttpTTSService(TTSService):
         """
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model="async_flash_v1.0",
+            model="async_flash_v1.5",
             voice=None,
             language=None,
         )
@@ -613,13 +617,13 @@ class AsyncAIHttpTTSService(TTSService):
         """
         return language_to_async_language(language)
 
-    async def start(self, frame: StartFrame):
-        """Start the Async HTTP TTS service.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the service.
 
         Args:
-            frame: The start frame containing initialization parameters.
+            setup: Configuration object containing setup parameters.
         """
-        await super().start(frame)
+        await super().setup(setup)
         self._output_sample_rate = self.sample_rate
 
     @traced_tts
@@ -633,8 +637,6 @@ class AsyncAIHttpTTSService(TTSService):
         Yields:
             Frame: Audio frames containing the synthesized speech.
         """
-        logger.debug(f"{self}: Generating TTS [{text}]")
-
         try:
             voice_config = {"mode": "id", "id": self._settings.voice}
 

@@ -45,10 +45,11 @@ class FireworksLLMService(OpenAILLMService):
 
         Args:
             api_key: The API key for accessing Fireworks AI.
-            model: The model identifier to use. Defaults to "accounts/fireworks/models/firefunction-v2".
+            model: The model identifier to use. Defaults to "accounts/fireworks/models/nemotron-3-ultra-nvfp4".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=FireworksLLMService.Settings(model=...)`` instead.
+                    Will be removed in 2.0.0.
 
             base_url: The base URL for Fireworks API. Defaults to "https://api.fireworks.ai/inference/v1".
             settings: Runtime-updatable settings. When provided alongside deprecated
@@ -56,7 +57,7 @@ class FireworksLLMService(OpenAILLMService):
             **kwargs: Additional keyword arguments passed to OpenAILLMService.
         """
         # 1. Initialize default_settings with hardcoded defaults
-        default_settings = self.Settings(model="accounts/fireworks/models/firefunction-v2")
+        default_settings = self.Settings(model="accounts/fireworks/models/nemotron-3-ultra-nvfp4")
 
         # 2. Apply direct init arg overrides (deprecated)
         if model is not None:
