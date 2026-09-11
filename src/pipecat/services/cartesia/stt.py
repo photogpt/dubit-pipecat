@@ -208,6 +208,8 @@ class CartesiaSTTService(WebsocketSTTService):
         sample_rate: int | None = None,
         live_options: CartesiaLiveOptions | None = None,
         extra_headers: dict[str, str] | None = None,
+        # Dubit Edit: keep opt-in STT transcript wrapping for Dubit bot pipelines.
+        vad_enabled: bool = False,
         settings: Settings | None = None,
         ttfs_p99_latency: float | None = CARTESIA_TTFS_P99,
         **kwargs,
@@ -230,6 +232,10 @@ class CartesiaSTTService(WebsocketSTTService):
 
             extra_headers: Additional headers to send on the websocket handshake. Merged
                 after the default headers, so it can override them.
+            vad_enabled: Dubit pipeline mode. When enabled, final
+                transcriptions are wrapped with ordered
+                ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``
+                markers.
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
             ttfs_p99_latency: P99 latency from speech end to final transcript in seconds.
@@ -281,6 +287,8 @@ class CartesiaSTTService(WebsocketSTTService):
 
         # Init-only audio config (not runtime-updatable).
         self._encoding = encoding
+        # Dubit Edit: remember whether final transcripts should be wrapped in standard turn frames.
+        self.vad_enabled = vad_enabled
 
     def can_generate_metrics(self) -> bool:
         """Check if the service can generate processing metrics.
@@ -499,14 +507,16 @@ class CartesiaSTTService(WebsocketSTTService):
                 # Report usage before the transcription frame so tracing can
                 # attach it to the STT span the frame closes.
                 await self.emit_stt_usage_metrics()
-                await self.push_frame(
+                # Dubit Edit: vad_enabled preserves Dubit ordering around final transcripts.
+                await self._push_transcription_with_turn_frames(
                     TranscriptionFrame(
                         transcript,
                         self._user_id,
                         time_now_iso8601(),
                         language,
                         result=data,
-                    )
+                    ),
+                    wrap_with_turn_frames=self.vad_enabled,
                 )
                 await self._handle_transcription(transcript, is_final, language)
             else:
