@@ -483,8 +483,8 @@ class TextSegmentMap:
         translated back to a position in the real text, tags included, by
         :func:`~pipecat.utils.text.markup_utils.raw_offset_after_clean_chars`.
 
-        Only ``PLACED`` comes out of this. A word that runs past the end of the
-        segment is left to the two earlier passes.
+        A word may also cross a segment boundary after markup is removed. Its
+        consumed prefix is measured in the provider's original word.
         """
         stripped = segment_remaining.lstrip()
         lead_ws = len(segment_remaining) - len(stripped)
@@ -494,6 +494,12 @@ class TextSegmentMap:
             if candidate and haystack.startswith(candidate):
                 raw_len = raw_offset_after_clean_chars(stripped, len(candidate))
                 return _Hop(_HopKind.PLACED, segment_advance=lead_ws + raw_len)
+            # Dubit Edit: Azure can report one word across tagged/untagged segments.
+            if haystack and candidate.startswith(haystack):
+                return _Hop(
+                    _HopKind.CROSSES,
+                    word_consumed=raw_offset_after_clean_chars(remaining_word, len(haystack)),
+                )
         return None
 
     @staticmethod

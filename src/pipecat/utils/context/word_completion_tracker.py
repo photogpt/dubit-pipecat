@@ -95,10 +95,10 @@ class WordCompletionTracker:
         self._llm_text = llm_text
 
         # --- Cursors into two of them ---
-        # The map owns the authoritative positions; these mirror it, and only
-        # diverge where the tracker deliberately moves further (see
-        # _record_llm_span and _force_complete). The position in tts_text is not
-        # mirrored -- the map's raw_pos is read directly.
+        # The map owns the authoritative positions. The LLM cursor can lag while
+        # a transformed span is suppressed, or advance over trailing unspoken text
+        # (see _record_llm_span and _force_complete). The position in tts_text is
+        # not mirrored -- the map's raw_pos is read directly.
         self._user_facing_pos = 0
         self._llm_pos = 0
 
@@ -246,6 +246,8 @@ class WordCompletionTracker:
             self._llm_pos = len(self._llm_text)
         elif self._segment_map.in_transformed_segment:
             self._llm_consumed = None
+            # Dubit Edit: keep any completed prefix pending while this word ends in a rewrite.
+            self._llm_pos = llm_pos_before
         elif self._llm_pos == llm_pos_before and self._segment_map.last_completed_segment is None:
             start = self._llm_pos
             while start < len(self._llm_text) and self._llm_text[start].isspace():

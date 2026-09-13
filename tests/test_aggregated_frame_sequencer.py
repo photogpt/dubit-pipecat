@@ -27,6 +27,7 @@ Test groups:
 """
 
 import unittest
+import xml.etree.ElementTree as ET
 
 from pipecat.frames.frames import (
     AggregatedTextFrame,
@@ -56,6 +57,95 @@ def _spoken_frame(text: str, raw_text: str | None = None) -> AggregatedTextFrame
 
 def _skipped_frame(text: str) -> AggregatedTextFrame:
     return AggregatedTextFrame(text, "code")
+
+
+class TestWordsAcrossMarkupSegments(unittest.IsolatedAsyncioTestCase):
+    async def test_time_events_cross_tags_without_losing_following_words(self):
+        cases = [
+            (
+                'It is <say-as interpret-as="time" format="hms12">9:40 AM</say-as> '
+                "in the morning, and today's date is September thirteenth, "
+                "two thousand twenty-six.",
+                [
+                    "It",
+                    "is",
+                    "9:40 A",
+                    "M in",
+                    "the",
+                    "morning,",
+                    "and",
+                    "today's",
+                    "date",
+                    "is",
+                    "September",
+                    "thirteenth,",
+                    "two",
+                    "thousand",
+                    "twenty-six.",
+                ],
+            ),
+            (
+                'I mean, it is currently <say-as interpret-as="time" format="hms12">'
+                "9:50 AM</say-as> and today",
+                ["I", "mean,", "it", "is", "currently", "9:50 AM", "and", "today"],
+            ),
+        ]
+        for text, words in cases:
+            with self.subTest(text=text):
+                seq = _seq()
+                await seq.register_spoken(_spoken_frame(text, raw_text=text), "ctx", text, True)
+                emitted = []
+                for word in words:
+                    frames = [
+                        f for f in seq.process_word(word, 1, "ctx") if isinstance(f, TTSTextFrame)
+                    ]
+                    self.assertTrue(frames, f"Dropped word: {word}")
+                    emitted.extend(frames)
+                self.assertEqual(seq.force_complete("ctx", 2), [])
+                context_text = concatenate_aggregated_text(
+                    [
+                        TextPartForConcatenation(
+                            f.raw_text or f.text, f.includes_inter_frame_spaces
+                        )
+                        for f in emitted
+                        if f.append_to_context
+                    ]
+                )
+                actual = ET.fromstring(f"<root>{context_text}</root>")
+                expected = ET.fromstring(f"<root>{text}</root>")
+                self.assertEqual(
+                    "".join(actual.itertext()).split(), "".join(expected.itertext()).split()
+                )
+                self.assertEqual(actual.find("say-as").attrib, expected.find("say-as").attrib)
+
+    async def test_foreign_time_stays_rejected_then_valid_event_recovers(self):
+        text = '<say-as interpret-as="time" format="hms12">9:50 AM</say-as> today'
+        seq = _seq()
+        await seq.register_spoken(_spoken_frame(text), "ctx", text, True)
+        self.assertEqual(seq.process_word("9:55 PM", 1, "ctx"), [])
+        self.assertTrue(seq.process_word("9:50 AM", 2, "ctx"))
+        self.assertTrue(seq.process_word("today", 3, "ctx"))
+        self.assertEqual(seq.force_complete("ctx", 4), [])
+
+    async def test_force_complete_preserves_prefix_of_a_suppressed_time_event(self):
+        text = 'It is <say-as interpret-as="time" format="hms12">9:40 AM</say-as> today'
+        seq = _seq()
+        await seq.register_spoken(_spoken_frame(text), "ctx", text, True)
+        frames = []
+        for word in ("It", "is", "9:40 A"):
+            frames.extend(seq.process_word(word, 1, "ctx"))
+        frames.extend(seq.force_complete("ctx", 2))
+        context_text = concatenate_aggregated_text(
+            [
+                TextPartForConcatenation(
+                    frame.raw_text or frame.text, frame.includes_inter_frame_spaces
+                )
+                for frame in frames
+                if isinstance(frame, TTSTextFrame) and frame.append_to_context
+            ]
+        )
+        actual = ET.fromstring(f"<root>{context_text}</root>")
+        self.assertEqual("".join(actual.itertext()).split(), ["It", "is", "9:40", "AM", "today"])
 
 
 # ---------------------------------------------------------------------------
