@@ -45,7 +45,8 @@ version_gt() {
 	test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
 }
 
-prev_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+# Compare version tags, not the moving latest/beta aliases.
+prev_tag=$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)
 
 if [ -n "$prev_tag" ]; then
 	prev_version=${prev_tag#v}
@@ -149,20 +150,22 @@ fi
 current_date=$(date +%Y-%m-%d)
 if [ "$has_unreleased" = true ]; then
 	tag="v${latest_version}+dubit-beta-${current_date}"
+	alias_tag="beta"
 else
 	tag="v${latest_version}+dubit-${current_date}"
+	alias_tag="latest"
 fi
 
 echo "Preparing tag: $tag"
 
 # Add a patch counter if the tag already exists
-if git tag | grep -q "^${tag}$"; then
+if git show-ref --verify --quiet "refs/tags/$tag"; then
     echo "Tag $tag already exists."
     # Initialize counter for unique identifier
     counter=1
     new_tag="${tag}-${counter}"
     # Find the next available tag by incrementing the counter
-    while git tag | grep -q "^${new_tag}$"; do
+    while git show-ref --verify --quiet "refs/tags/$new_tag"; do
         counter=$((counter + 1))
         new_tag="${tag}-${counter}"
     done
@@ -170,13 +173,17 @@ if git tag | grep -q "^${tag}$"; then
     echo "Using new tag: $tag"
 fi
 
-read -p "Confirm and push tag? (y / (default) n): " confirm
+echo "Moving alias: $alias_tag -> $tag"
+read -p "Confirm and push both tags? (y / (default) n): " confirm
 if [ "$confirm" != "y" ]; then
 	echo "Exiting."
 	exit 0
 fi
 
 git tag "$tag"
-git push origin "$tag"
+# Publish both tags together. Only the alias may replace an existing remote tag.
+git push --atomic origin "refs/tags/$tag" \
+	"+refs/tags/$tag:refs/tags/$alias_tag"
+git tag --force "$alias_tag" "refs/tags/$tag"
 
-echo "Tag pushed successfully."
+echo "Published $tag and updated $alias_tag."
